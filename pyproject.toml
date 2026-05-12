@@ -1,0 +1,14 @@
+[project]
+name = "titan"
+version = "0.2.0"
+description = "Titan-style resilient agent harness"
+requires-python = ">=3.9"
+dependencies = ["pydantic>=2.0", "rich>=13.0", "textual>=0.70.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"
+
+[project.scripts]
+titan = "titan.titan_cli:main"
+titan-tui = "titan.titan_tui:run"

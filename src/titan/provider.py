@@ -1,0 +1,390 @@
+from __future__ import annotations
+import json
+import random
+import time
+from dataclasses import dataclass
+from urllib import request, error
+
+from .types import AssistantResponse, Message, ToolCall
+from typing import Any
+from .auth import resolve_provider_credentials
+from .config import RetryConfig, HarnessConfig
+
+
+class ProviderError(Exception):
+    def __init__(self, message: str, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+class Provider:
+    def generate(self, model: str, messages: list[Message], tools: list[dict]) -> AssistantResponse:
+        raise NotImplementedError
+
+    def generate_with_callback(self, model: str, messages: list[Message], tools: list[dict], on_event=None) -> AssistantResponse:
+        return self.generate(model, messages, tools)
+
+
+def build_provider_from_config(cfg: HarnessConfig) -> Provider:
+    provider_name = (cfg.provider or "openai-codex").strip().lower()
+
+    if provider_name == "mock":
+        from .mock_provider import make_tool_then_final_script, MockProvider
+
+        return MockProvider(script=make_tool_then_final_script())
+
+    if provider_name == "openai-codex":
+        creds = resolve_provider_credentials(
+            provider_name,
+            api_key_env=cfg.oauth_token_env,
+            base_url=cfg.api_base or None,
+        )
+    elif provider_name == "openai":
+        creds = resolve_provider_credentials(
+            provider_name,
+            api_key_env=cfg.api_key_env,
+            base_url=cfg.api_base or None,
+        )
+    else:
+        creds = resolve_provider_credentials(provider_name, base_url=cfg.api_base or None)
+
+    return OpenAICompatProvider(
+        api_base=(creds.base_url if creds and creds.base_url else cfg.api_base),
+        api_key=(creds.token if creds else cfg.api_key()),
+    )
+
+
+def retry_call(fn, retry: RetryConfig):
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            return fn()
+        except ProviderError as e:
+            if not e.retryable or attempts > retry.max_retries + 1:
+                raise
+            delay = min(retry.max_delay_ms, retry.base_delay_ms * (2 ** (attempts - 1)))
+            time.sleep((delay + random.randint(0, delay)) / 1000)
+
+
+@dataclass
+class OpenAICompatProvider(Provider):
+    api_base: str
+    api_key: str = ""
+
+    def generate(self, model: str, messages: list[Message], tools: list[dict]) -> AssistantResponse:
+        return self.generate_with_callback(model, messages, tools, on_event=None)
+
+    def generate_with_callback(self, model: str, messages: list[Message], tools: list[dict], on_event=None) -> AssistantResponse:
+        token = (self.api_key or "").strip()
+        base = (self.api_base or "").strip() or "https://api.openai.com/v1"
+        if not token:
+            raise ProviderError("missing provider credentials", retryable=False)
+
+        # Codex OAuth backend requires /responses with stream=true and store=false.
+        if "chatgpt.com/backend-api/codex" in base:
+            return self._generate_codex_responses(base, token, model, messages, tools, on_event=on_event)
+
+        return self._generate_chat_completions(base, token, model, messages, tools, on_event=on_event)
+
+    def _read_http_error_body(self, e: error.HTTPError) -> str:
+        try:
+            return e.read().decode(errors="ignore")
+        except Exception:
+            return getattr(e, "reason", "") or getattr(e, "msg", "") or ""
+
+    def _parse_sse_data(self, data_str: str) -> dict[str, Any] | None:
+        try:
+            evt = json.loads(data_str)
+            return evt if isinstance(evt, dict) else None
+        except Exception:
+            # Some OpenAI-compatible streams emit argument delta fragments with
+            # unescaped JSON quotes inside the SSE JSON envelope. Preserve the
+            # envelope fields we need instead of dropping the tool-call delta.
+            if '"type":"response.function_call_arguments.delta"' not in data_str:
+                return None
+            item_marker = '"item_id":"'
+            delta_marker = '"delta":"'
+            item_start = data_str.find(item_marker)
+            delta_start = data_str.find(delta_marker)
+            if item_start < 0 or delta_start < 0:
+                return None
+            item_start += len(item_marker)
+            item_end = data_str.find('"', item_start)
+            if item_end < 0:
+                return None
+            delta_start += len(delta_marker)
+            delta_end = data_str.rfind('"')
+            if delta_end < delta_start:
+                return None
+            return {
+                "type": "response.function_call_arguments.delta",
+                "item_id": data_str[item_start:item_end],
+                "delta": data_str[delta_start:delta_end].replace('\\"', '"'),
+            }
+
+    def _chat_message_content(self, message: dict[str, Any]) -> str:
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") in {"text", "output_text"} and item.get("text"):
+                    text_parts.append(str(item.get("text")))
+            return "".join(text_parts)
+        return ""
+
+    def _generate_chat_completions(self, base: str, token: str, model: str, messages: list[Message], tools: list[dict], on_event=None) -> AssistantResponse:
+        url = f"{base.rstrip('/')}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": [{"role": m.role.value, "content": m.content} for m in messages],
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": 0,
+        }
+        if on_event:
+            payload["stream"] = True
+        req = request.Request(url, method="POST")
+        req.add_header("Content-Type", "application/json")
+        if on_event:
+            req.add_header("Accept", "text/event-stream")
+        req.add_header("Authorization", f"Bearer {token}")
+        body = json.dumps(payload).encode()
+
+        try:
+            with request.urlopen(req, data=body, timeout=90) as resp:
+                if on_event:
+                    return self._parse_chat_completions_stream(resp, on_event)
+                data = json.loads(resp.read().decode())
+        except error.HTTPError as e:
+            txt = self._read_http_error_body(e)
+            retryable = e.code in (408, 409, 429, 500, 502, 503, 504)
+            raise ProviderError(f"http {e.code}: {txt}", retryable=retryable)
+        except Exception as e:
+            raise ProviderError(str(e), retryable=True)
+
+        choice = (data.get("choices") or [{}])[0].get("message", {})
+        text = self._chat_message_content(choice)
+        tool_calls = []
+        for tc in choice.get("tool_calls") or []:
+            fn = tc.get("function", {})
+            args = fn.get("arguments") or "{}"
+            try:
+                parsed = json.loads(args) if isinstance(args, str) else args
+            except Exception:
+                parsed = {}
+            tool_calls.append(ToolCall(id=tc.get("id", "call_unknown"), name=fn.get("name", ""), arguments=parsed if isinstance(parsed, dict) else {}))
+        usage = data.get("usage") or {}
+        return AssistantResponse(text=text, tool_calls=tool_calls, input_tokens=usage.get("prompt_tokens", 0), output_tokens=usage.get("completion_tokens", 0))
+
+    def _parse_chat_completions_stream(self, resp, on_event) -> AssistantResponse:
+        text_parts: list[str] = []
+        tool_calls_by_index: dict[int, dict[str, Any]] = {}
+        for raw in resp:
+            line = raw.decode(errors="ignore").strip()
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                evt = json.loads(data_str)
+            except Exception:
+                continue
+            choice = (evt.get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            content = delta.get("content") or ""
+            if content:
+                text_parts.append(content)
+                on_event("stream_delta", text=content, kind="text")
+            for tc in delta.get("tool_calls") or []:
+                index = int(tc.get("index", 0))
+                slot = tool_calls_by_index.setdefault(index, {"id": tc.get("id") or f"call_{index}", "name": "", "arguments": ""})
+                if tc.get("id"):
+                    slot["id"] = tc.get("id")
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["name"] = fn.get("name")
+                    on_event("stream_tool_call", id=slot["id"], name=slot["name"], kind="tool_call")
+                if fn.get("arguments"):
+                    slot["arguments"] = (slot.get("arguments") or "") + fn.get("arguments")
+        parsed_tool_calls: list[ToolCall] = []
+        for _index, tc in sorted(tool_calls_by_index.items()):
+            args_raw = tc.get("arguments") or "{}"
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            except Exception:
+                args = {}
+            parsed_tool_calls.append(ToolCall(id=tc.get("id", "call_unknown"), name=tc.get("name", ""), arguments=args if isinstance(args, dict) else {}))
+        return AssistantResponse(text="".join(text_parts), tool_calls=parsed_tool_calls, input_tokens=0, output_tokens=0)
+
+    def _extract_text_from_completed_event(self, evt: dict[str, Any]) -> str:
+        resp = evt.get("response") or {}
+        out = resp.get("output") or []
+        text_parts: list[str] = []
+        for item in out:
+            if item.get("type") != "message":
+                continue
+            for c in item.get("content") or []:
+                if c.get("type") == "output_text" and c.get("text"):
+                    text_parts.append(c["text"])
+        return "".join(text_parts)
+
+    def _merge_tool_call(self, by_call_id: dict[str, dict[str, Any]], item: dict[str, Any]) -> None:
+        if (item.get("type") or "") != "function_call":
+            return
+        call_id = item.get("call_id") or item.get("id")
+        if not call_id:
+            return
+        slot = by_call_id.setdefault(call_id, {"id": item.get("id") or call_id, "name": item.get("name", ""), "arguments": ""})
+        if item.get("name"):
+            slot["name"] = item.get("name")
+        if item.get("arguments"):
+            slot["arguments"] = item.get("arguments")
+
+    def _generate_codex_responses(self, base: str, token: str, model: str, messages: list[Message], tools: list[dict], on_event=None) -> AssistantResponse:
+        url = f"{base.rstrip('/')}/responses"
+        system_text = "You are a helpful coding assistant."
+        for m in messages:
+            if m.role.value == "system" and m.content.strip():
+                system_text = m.content.strip()
+                break
+
+        codex_tools = []
+        for t in tools or []:
+            if t.get("type") == "function":
+                fn = t.get("function") or {}
+                codex_tools.append({
+                    "type": "function",
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description", ""),
+                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                })
+
+        input_items: list[dict[str, Any]] = []
+        for m in messages:
+            if m.role.value in ("user", "assistant"):
+                input_items.append({"role": m.role.value, "content": m.content})
+            elif m.role.value == "tool":
+                call_id = m.tool_call_id or ""
+                tool_name = m.tool_name or "tool"
+                # Responses API requires call_id in function_call_output to match a function_call item in input scope.
+                input_items.append({
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": tool_name,
+                    "arguments": "{}",
+                })
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": m.content,
+                })
+
+        payload = {
+            "model": model,
+            "instructions": system_text,
+            "input": input_items,
+            "stream": True,
+            "store": False,
+            "tools": codex_tools,
+        }
+
+        req = request.Request(url, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Accept", "text/event-stream")
+        req.add_header("Authorization", f"Bearer {token}")
+        body = json.dumps(payload).encode()
+
+        text_parts: list[str] = []
+        tool_calls_by_id: dict[str, dict[str, Any]] = {}
+        item_to_call_id: dict[str, str] = {}
+
+        try:
+            with request.urlopen(req, data=body, timeout=120) as resp:
+                for raw in resp:
+                    line = raw.decode(errors="ignore").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if not data_str or data_str == "[DONE]":
+                        continue
+                    try:
+                        evt = self._parse_sse_data(data_str)
+                    except Exception:
+                        evt = None
+                    if not evt:
+                        continue
+
+                    t = evt.get("type")
+                    if t == "response.output_text.delta":
+                        d = evt.get("delta") or ""
+                        if d:
+                            text_parts.append(d)
+                            if on_event:
+                                on_event("stream_delta", text=d, kind="text")
+                    elif t == "response.output_item.added" or t == "response.output_item.done":
+                        item = evt.get("item") or {}
+                        self._merge_tool_call(tool_calls_by_id, item)
+                        if item.get("type") == "function_call":
+                            item_id = item.get("id")
+                            call_id = item.get("call_id") or item_id
+                            if item_id and call_id:
+                                item_to_call_id[item_id] = call_id
+                            if on_event:
+                                on_event(
+                                    "stream_tool_call",
+                                    id=call_id or "",
+                                    name=item.get("name", ""),
+                                    kind="tool_call",
+                                )
+                    elif t == "response.function_call_arguments.delta":
+                        item_id = evt.get("item_id")
+                        delta = evt.get("delta") or ""
+                        if item_id and delta:
+                            call_id = item_to_call_id.get(item_id)
+                            if call_id:
+                                slot = tool_calls_by_id.setdefault(call_id, {"id": call_id, "name": "", "arguments": ""})
+                                slot["arguments"] = (slot.get("arguments") or "") + delta
+                    elif t == "response.function_call_arguments.done":
+                        item_id = evt.get("item_id")
+                        args = evt.get("arguments")
+                        if item_id and args is not None:
+                            call_id = item_to_call_id.get(item_id)
+                            if call_id:
+                                slot = tool_calls_by_id.setdefault(call_id, {"id": call_id, "name": "", "arguments": ""})
+                                slot["arguments"] = args
+                    elif t == "response.completed":
+                        if not text_parts:
+                            completed_text = self._extract_text_from_completed_event(evt)
+                            if completed_text:
+                                text_parts.append(completed_text)
+                        for item in ((evt.get("response") or {}).get("output") or []):
+                            self._merge_tool_call(tool_calls_by_id, item)
+                    elif t == "error":
+                        err = evt.get("error") or evt
+                        raise ProviderError(f"codex_error: {json.dumps(err)}", retryable=False)
+        except ProviderError:
+            raise
+        except error.HTTPError as e:
+            txt = self._read_http_error_body(e)
+            retryable = e.code in (408, 409, 429, 500, 502, 503, 504)
+            raise ProviderError(f"http {e.code}: {txt}", retryable=retryable)
+        except Exception as e:
+            raise ProviderError(str(e), retryable=True)
+
+        parsed_tool_calls: list[ToolCall] = []
+        for call_id, tc in tool_calls_by_id.items():
+            args_raw = tc.get("arguments") or "{}"
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            except Exception:
+                args = {}
+            parsed_tool_calls.append(ToolCall(id=call_id, name=tc.get("name", ""), arguments=args if isinstance(args, dict) else {}))
+
+        text = "".join(text_parts).strip()
+        return AssistantResponse(text=text, tool_calls=parsed_tool_calls, input_tokens=0, output_tokens=0)
