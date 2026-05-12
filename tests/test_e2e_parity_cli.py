@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import os
-import shutil
+import site
 import subprocess
+import sys
 from pathlib import Path
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def run_cli(args: list[str], cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    titan_bin = shutil.which("titan", path=env.get("PATH")) or "titan"
-    cmd = [titan_bin, *args]
-    return subprocess.run(cmd, cwd=str(cwd), env=env, text=True, capture_output=True)
+    subprocess_env = env.copy()
+    pythonpath = [str(REPO_ROOT / "src"), site.getusersitepackages()]
+    existing_pythonpath = subprocess_env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        pythonpath.append(existing_pythonpath)
+    subprocess_env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+    cmd = [sys.executable, "-m", "titan.titan_cli", *args]
+    return subprocess.run(cmd, cwd=str(cwd), env=subprocess_env, text=True, capture_output=True)
 
 
 def test_e2e_setup_config_skills_and_run(tmp_path: Path):

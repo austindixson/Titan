@@ -624,3 +624,7 @@ def main() -> None:
         raise SystemExit(cmd_capability())
     if args.cmd == "doctor":
         raise SystemExit(cmd_doctor())
+
+
+if __name__ == "__main__":
+    main()
