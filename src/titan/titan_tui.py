@@ -289,7 +289,7 @@ class TitanTui(App[None]):
         self.ui = UiState()
         self.compact_ui = False
         self.trace_verbosity_levels = ["compact", "normal", "full"]
-        self.trace_verbosity_index = 0
+        self.trace_verbosity_index = self.trace_verbosity_levels.index("normal")
         self.plan_shown_this_run = False
         self.trace_lines: list[str] = []
         self.diff_lines: list[str] = []

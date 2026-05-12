@@ -34,19 +34,19 @@ def test_tui_controls_are_limited_to_stop_provider_operator_trace_quit(monkeypat
                 "btn-stop": "Stop",
                 "btn-provider": "Provider: openai",
                 "btn-clear": "Clear",
-                "btn-trace": "Trace: compact",
+                "btn-trace": "Trace: normal",
                 "btn-quit": "Quit",
             }
 
     asyncio.run(_run())
 
 
-def test_tui_trace_defaults_compact_and_small(monkeypatch):
+def test_tui_trace_defaults_normal_and_small(monkeypatch):
     _patch_tui_deps(monkeypatch)
 
     app = TitanTui()
 
-    assert app.trace_verbosity_levels[app.trace_verbosity_index] == "compact"
+    assert app.trace_verbosity_levels[app.trace_verbosity_index] == "normal"
     assert "#top {\n        height: 6;\n        min-height: 6;" in app.CSS
 
 
@@ -165,7 +165,7 @@ def test_tui_input_enter_submits_instead_of_inserting_newline(monkeypatch):
             await pilot.press("enter")
             await pilot.pause()
             assert composer.text == ""
-            assert app.trace_verbosity_levels[app.trace_verbosity_index] == "normal"
+            assert app.trace_verbosity_levels[app.trace_verbosity_index] == "full"
 
     asyncio.run(_run())
 
@@ -431,7 +431,7 @@ def test_tui_final_output_adds_summary_and_next_step_offer_when_recaps_enabled(m
         app.harness.config.chat_recaps_enabled = True
         async with app.run_test(size=(100, 32)):
             out = RunOutcome(
-                text="- PASS: input remains clickable\n- FAIL: trace default is not compact",
+                text="- PASS: input remains clickable\n- FAIL: trace default is not normal",
                 stop=RunStopContract(
                     reason=RunStopReason.AssistantFinal,
                     iterations=3,
