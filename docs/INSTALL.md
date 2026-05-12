@@ -46,9 +46,22 @@ titan config show
 titan
 ```
 
+
+## First provider run
+
+Run the TUI with:
+
+```bash
+titan
+```
+
+Use the Provider button / provider hotkey to cycle providers. If Titan cannot resolve a key from the environment, saved local config, Pi auth, or Hermes auth, it opens a hidden API-key input. Paste the key and press Enter; Titan saves it locally under `~/.titan/config.json` and redacts it from `titan config show`.
+
+Multi-line pastes are compacted in the composer as `[pasted N lines]` so the UI stays readable, but the full paste is sent when you submit. Pasting or dragging local files/photos into the terminal normalizes them to absolute paths.
+
 ## Configure provider credentials
 
-Titan does not store API keys in the repository. Provide credentials via environment variables or your local Titan config.
+Titan does not store API keys in the repository. Provide credentials via environment variables, the hidden TUI provider prompt, or your local Titan config.
 
 Preferred OpenAI Codex OAuth path:
 

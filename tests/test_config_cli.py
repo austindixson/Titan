@@ -90,6 +90,17 @@ def test_config_set_nested_key(monkeypatch, tmp_path: Path):
     assert cfg.retry.max_retries == 5
 
 
+def test_config_loads_saved_provider_api_keys(monkeypatch, tmp_path: Path):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("TITAN_CONFIG_PATH", str(cfg_path))
+    write_default_config(resolve_config_path(), force=True)
+
+    update_config_key(resolve_config_path(), "api_keys.xai", "xai-test-key")
+
+    cfg = load_harness_config()
+    assert cfg.api_keys["xai"] == "xai-test-key"
+
+
 def test_env_overrides_file(monkeypatch, tmp_path: Path):
     cfg_path = tmp_path / "config.json"
     monkeypatch.setenv("TITAN_CONFIG_PATH", str(cfg_path))

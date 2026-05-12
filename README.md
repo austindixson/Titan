@@ -2,6 +2,21 @@
 
 Resilient local-first agent harness with Titan state-machine orchestration, checkpointing, replay, provider streaming, and a full-screen Textual TUI.
 
+
+## Philosophy
+
+Titan is for builders who want to talk conversationally and get working software back: finished MVPs, quick iterations, robust tests, and fewer walls of process output. It is intentionally local-first and harness-first, but not bloated. The chat stays primary; traceability is available when troubleshooting, not forced into every response.
+
+I built Titan for myself because coding-agent harnesses were becoming too heavy: too many panes, too much ceremony, too much output, and not enough finished product. Titan keeps the loop resilient while preserving a simple conversation: ask for the thing, watch concise progress, inspect trace/diff when needed, and keep shipping.
+
+Titan is for:
+- Non-expert coders who want to build real products through conversation.
+- Solo builders who care about MVP speed and working test suites.
+- Agent/harness tinkerers who still need transparent traces when debugging.
+- People who prefer concise chat over three pages of tool logs.
+
+Titan is not trying to hide execution. It keeps trace and diff tabs because accountability matters. It just keeps that detail out of the way until you need it.
+
 ## What is implemented
 
 - Deterministic stop contracts (`RunStopReason`, `RunStopContract`, `RunOutcome`)
@@ -10,7 +25,10 @@ Resilient local-first agent harness with Titan state-machine orchestration, chec
 - Permission gate (allow vs prompt/restricted)
 - Provider retry wrapper (retryable vs non-retryable)
 - JSONL session persistence
-- Minimal terminal CLI
+- Minimal terminal CLI and canonical `titan` TUI launcher
+- Pasted multi-line input is compacted in the composer as `[pasted N lines]` while the full content is sent on submit
+- Pasted or terminal-dropped local files/photos normalize to absolute paths
+- Provider selection prompts for a hidden API-key input when no key is already saved/resolved
 - Test suite covering core reliability behavior
 
 ## Docs
@@ -86,9 +104,12 @@ TUI slash shortcuts:
 - /trace
 
 Auth resolution order:
-1) OPENAI_OAUTH_TOKEN
-2) OPENAI_API_KEY
-3) ~/.hermes/auth.json (openai-codex token)
+1) Provider-specific environment variable, for example `OPENAI_OAUTH_TOKEN`, `OPENAI_API_KEY`, `XAI_API_KEY`, or `OPENROUTER_API_KEY`
+2) `~/.pi/agent/auth.json` when present
+3) `~/.hermes/auth.json` for OpenAI/OpenAI Codex
+4) Saved local `~/.titan/config.json` API key entered through the TUI provider prompt
+
+Saved API keys are local-only and redacted from `titan config show`.
 
 
 ## Security / repository hygiene
@@ -136,6 +157,8 @@ TUI controls:
 - Ctrl+D: switch top panel between Trace and Diff
 - Ctrl+F: focus input
 - Ctrl+L: clear transcript
+- Paste multi-line text: composer shows `[pasted N lines]`; full paste is submitted
+- Paste/drag local files or photos into the terminal: Titan normalizes them to paths
 
 ## Run minimal TUI demo (mock)
 

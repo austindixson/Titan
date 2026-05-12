@@ -89,7 +89,14 @@ def cmd_config_show() -> int:
         c.print(f"config not found: {path}")
         c.print("run: titan setup")
         return 1
-    c.print(path.read_text().strip())
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        c.print(path.read_text().strip())
+        return 0
+    if isinstance(data, dict) and isinstance(data.get("api_keys"), dict):
+        data["api_keys"] = {k: "********" for k in data["api_keys"]}
+    c.print(json.dumps(data, indent=2))
     return 0
 
 
@@ -108,6 +115,9 @@ def cmd_config_get(key: str) -> int:
     if value is None:
         c.print(f"key not found: {key}")
         return 1
+    if key == "api_keys" or key.startswith("api_keys."):
+        c.print("********" if value else "")
+        return 0
     c.print(json.dumps(value) if isinstance(value, (dict, list, bool, int)) else str(value))
     return 0
 

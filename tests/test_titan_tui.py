@@ -1,6 +1,6 @@
 import asyncio
 
-from textual.widgets import Button, TextArea
+from textual.widgets import Button, Input, TextArea
 
 from titan.config import HarnessConfig
 from titan.mock_provider import MockProvider
@@ -101,6 +101,38 @@ def test_tui_input_uses_wrapping_text_area(monkeypatch):
     asyncio.run(_run())
 
 
+def test_tui_paste_multiline_shows_line_count_but_expands_on_submit(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            composer = app.query_one("#input", titan_tui_module.ComposerTextArea)
+            pasted = "alpha\nbeta\ngamma"
+
+            display = composer.normalize_paste_for_display(pasted)
+
+            assert display == "[pasted 3 lines #1]"
+            assert composer.expand_paste_tokens(f"use {display}") == f"use {pasted}"
+
+    asyncio.run(_run())
+
+
+def test_tui_paste_file_uri_normalizes_to_absolute_path(monkeypatch, tmp_path):
+    _patch_tui_deps(monkeypatch)
+    file_path = tmp_path / "photo one.png"
+    file_path.write_text("fake image")
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            composer = app.query_one("#input", titan_tui_module.ComposerTextArea)
+            display = composer.normalize_paste_for_display(file_path.as_uri())
+            assert display == str(file_path)
+
+    asyncio.run(_run())
+
+
 def test_tui_input_enter_submits_instead_of_inserting_newline(monkeypatch):
     _patch_tui_deps(monkeypatch)
 
@@ -160,6 +192,32 @@ def test_tui_trace_provider_request_shows_tools_used_not_available(monkeypatch):
             assert "terminal" not in request_lines[0]
 
     asyncio.run(_run())
+
+
+def test_tui_provider_selection_prompts_and_saves_missing_api_key(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+    saved = []
+    monkeypatch.setattr("titan.titan_tui.resolve_provider_credentials", lambda *args, **kwargs: None)
+    monkeypatch.setattr("titan.titan_tui.update_config_key", lambda path, key, value: saved.append((key, value)))
+
+    async def _run():
+        app = TitanTui()
+        app.provider_options = ["openai", "xai"]
+        async with app.run_test(size=(100, 32)):
+            app.action_cycle_provider()
+            key_input = app.query_one("#api_key_input", Input)
+            assert app.pending_api_key_provider == "xai"
+            assert key_input.password is True
+            assert key_input.display is True
+
+            key_input.value = "xai-test-key"
+            app.on_input_submitted(Input.Submitted(key_input, key_input.value))
+            assert app.pending_api_key_provider is None
+            assert key_input.display is False
+            assert app.harness.config.api_keys["xai"] == "xai-test-key"
+
+    asyncio.run(_run())
+    assert saved == [("api_keys.xai", "xai-test-key")]
 
 
 def test_tui_trace_shows_rejected_tool_calls(monkeypatch):

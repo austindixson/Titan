@@ -50,7 +50,7 @@ def build_provider_from_config(cfg: HarnessConfig) -> Provider:
 
     return OpenAICompatProvider(
         api_base=(creds.base_url if creds and creds.base_url else cfg.api_base),
-        api_key=(creds.token if creds else cfg.api_key()),
+        api_key=(creds.token if creds else (cfg.api_keys.get(provider_name, "") or cfg.api_key())),
     )
 
 

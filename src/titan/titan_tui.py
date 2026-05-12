@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import time
 import json
+import shlex
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from rich import box
 from rich.panel import Panel
@@ -13,10 +16,10 @@ from textual.containers import Container, Horizontal
 from textual import events
 from textual.css.query import NoMatches
 from textual.message import Message as TextualMessage
-from textual.widgets import Button, Footer, Header, RichLog, Static, TextArea
+from textual.widgets import Button, Footer, Header, Input, RichLog, Static, TextArea
 
-from .auth import supported_openai_compat_providers
-from .config import load_harness_config
+from .auth import resolve_provider_credentials, supported_openai_compat_providers
+from .config import load_harness_config, resolve_config_path, update_config_key
 from .titan import TitanHarness
 from .loop import AgentEvent
 from .provider import build_provider_from_config
@@ -75,11 +78,69 @@ class ComposerTextArea(TextArea):
             self.value = value
             super().__init__()
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.paste_payloads: dict[str, str] = {}
+        self._paste_index = 0
+
+    def _path_from_token(self, token: str) -> str | None:
+        raw = token.strip().strip('"').strip("'")
+        if not raw:
+            return None
+        if raw.startswith("file://"):
+            parsed = urlparse(raw)
+            raw = unquote(parsed.path)
+        raw = raw.replace("\\ ", " ")
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        if path.exists():
+            return str(path)
+        return None
+
+    def _normalize_file_drop(self, text: str) -> str | None:
+        stripped = text.strip()
+        if not stripped:
+            return None
+        tokens: list[str]
+        try:
+            tokens = shlex.split(stripped)
+        except ValueError:
+            tokens = stripped.splitlines()
+        paths = [self._path_from_token(token) for token in tokens]
+        if paths and all(paths):
+            return "\n".join(paths)
+        single = self._path_from_token(stripped)
+        return single
+
+    def normalize_paste_for_display(self, text: str) -> str:
+        path_text = self._normalize_file_drop(text)
+        if path_text:
+            return path_text
+        lines = text.splitlines()
+        if len(lines) > 1:
+            self._paste_index += 1
+            token = f"[pasted {len(lines)} lines #{self._paste_index}]"
+            self.paste_payloads[token] = text
+            return token
+        return text
+
+    def expand_paste_tokens(self, text: str) -> str:
+        expanded = text
+        for token, payload in self.paste_payloads.items():
+            expanded = expanded.replace(token, payload)
+        return expanded
+
+    async def _on_paste(self, event: events.Paste) -> None:
+        event.stop()
+        event.prevent_default()
+        self.insert(self.normalize_paste_for_display(event.text))
+
     async def _on_key(self, event: events.Key) -> None:
         if event.key == "enter":
             event.stop()
             event.prevent_default()
-            self.post_message(self.Submitted(self.text))
+            self.post_message(self.Submitted(self.expand_paste_tokens(self.text)))
             return
         await super()._on_key(event)
 
@@ -157,6 +218,8 @@ class TitanTui(App[None]):
         min-height: 3;
         border: solid #3a3a3a;
     }
+    #api_key_prompt { height: 1; padding: 0 1; color: #fbbc04; }
+    #api_key_input { height: 3; border: solid #5f6368; }
     #status_line {
         height: 1;
         padding: 0 1;
@@ -188,6 +251,7 @@ class TitanTui(App[None]):
         self.diff_lines: list[str] = []
         self.chat_lines: list[str] = []
         self.active_top_tab = "trace"
+        self.pending_api_key_provider: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -213,6 +277,8 @@ class TitanTui(App[None]):
             compact=True,
             placeholder="Type task and press Enter",
         )
+        yield Static("", id="api_key_prompt")
+        yield Input("", id="api_key_input", password=True, placeholder="Paste API key and press Enter")
         yield Static("", id="status_line")
         yield Footer()
 
@@ -220,6 +286,8 @@ class TitanTui(App[None]):
         self.query_one("#trace", SelectableRichLog).write_selectable("trace ready")
         self._refresh_diff_tab()
         self._set_top_tab("trace")
+        self.query_one("#api_key_prompt", Static).display = False
+        self.query_one("#api_key_input", Input).display = False
         self.query_one("#input", ComposerTextArea).focus()
         self._apply_responsive_layout(self.size.width)
         self._refresh_status()
@@ -430,6 +498,7 @@ class TitanTui(App[None]):
         composer = self.query_one("#input", ComposerTextArea)
         task = event.value.strip()
         composer.load_text("")
+        composer.paste_payloads.clear()
         await self._submit_task(task)
 
     async def _submit_task(self, task: str) -> None:
@@ -678,6 +747,40 @@ class TitanTui(App[None]):
     def action_copy_chat(self) -> None:
         self._copy_to_clipboard("\n\n".join(self.chat_lines), "chat")
 
+    def _provider_has_key(self, provider: str) -> bool:
+        if provider == "mock":
+            return True
+        if self.harness.config.api_keys.get(provider):
+            return True
+        try:
+            return resolve_provider_credentials(provider, base_url=self.harness.config.api_base or None) is not None
+        except Exception:
+            return False
+
+    def _prompt_for_provider_key(self, provider: str) -> None:
+        self.pending_api_key_provider = provider
+        prompt = self.query_one("#api_key_prompt", Static)
+        key_input = self.query_one("#api_key_input", Input)
+        prompt.update(f"API key required for {provider}. Paste key and press Enter; input is hidden.")
+        prompt.display = True
+        key_input.value = ""
+        key_input.display = True
+        key_input.focus()
+        self._write_trace(f"provider {provider} needs a saved API key")
+
+    def _hide_provider_key_prompt(self) -> None:
+        self.pending_api_key_provider = None
+        self.query_one("#api_key_prompt", Static).display = False
+        key_input = self.query_one("#api_key_input", Input)
+        key_input.value = ""
+        key_input.display = False
+
+    def _save_provider_key(self, provider: str, key: str) -> None:
+        self.harness.config.api_keys[provider] = key
+        self.cfg.api_keys[provider] = key
+        update_config_key(resolve_config_path(), f"api_keys.{provider}", key)
+        self.harness.provider = build_provider_from_config(self.harness.config)
+
     def action_cycle_provider(self) -> None:
         if self.ui.pending:
             self._write_trace("provider switch blocked while run is active")
@@ -686,10 +789,27 @@ class TitanTui(App[None]):
         next_provider = self.provider_options[(idx + 1) % len(self.provider_options)]
         self.harness.config.provider = next_provider
         self.cfg.provider = next_provider
-        self.harness.provider = build_provider_from_config(self.harness.config)
+        if self._provider_has_key(next_provider):
+            self._hide_provider_key_prompt()
+            self.harness.provider = build_provider_from_config(self.harness.config)
+        else:
+            self._prompt_for_provider_key(next_provider)
         self._apply_responsive_layout(self.size.width)
         self._write_trace(f"provider -> {next_provider}")
         self._refresh_status()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "api_key_input" or not self.pending_api_key_provider:
+            return
+        key = event.value.strip()
+        provider = self.pending_api_key_provider
+        if not key:
+            self._write_trace(f"provider {provider} key not saved: empty input")
+            return
+        self._save_provider_key(provider, key)
+        self._hide_provider_key_prompt()
+        self._write_trace(f"saved API key for {provider}")
+        self.query_one("#input", ComposerTextArea).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id

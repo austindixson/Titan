@@ -22,6 +22,7 @@ class HarnessConfig:
     model: str = "gpt-5.4"
     provider: str = "openai-codex"
     api_base: str = ""
+    api_keys: dict[str, str] = field(default_factory=dict)
     auth_mode: str = "oauth"
     oauth_token_env: str = "OPENAI_OAUTH_TOKEN"
     api_key_env: str = "OPENAI_API_KEY"
@@ -97,6 +98,8 @@ def load_harness_config(
     cfg.provider = str(_deep_get(data, "provider", cfg.provider))
     cfg.model = str(_deep_get(data, "model", cfg.model))
     cfg.api_base = str(_deep_get(data, "api_base", cfg.api_base))
+    api_keys = _deep_get(data, "api_keys", cfg.api_keys)
+    cfg.api_keys = dict(api_keys) if isinstance(api_keys, dict) else {}
     cfg.permission_mode = str(_deep_get(data, "permission_mode", cfg.permission_mode))
     cfg.max_iterations = int(_deep_get(data, "max_iterations", cfg.max_iterations))
     cfg.max_wall_clock_ms = int(_deep_get(data, "max_wall_clock_ms", cfg.max_wall_clock_ms))
@@ -157,6 +160,7 @@ def write_default_config(path: Path, force: bool = False) -> bool:
         "provider": "openai-codex",
         "model": "gpt-5.4",
         "api_base": "",
+        "api_keys": {},
         "permission_mode": "allow",
         "max_iterations": 75,
         "max_wall_clock_ms": 600000,
