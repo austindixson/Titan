@@ -210,6 +210,7 @@ class TitanHarness:
 
         while session.turn < self.config.max_iterations:
             session.turn += 1
+            tool_calls_this_turn = 0
             emit("on_state_enter", state=session.current_state.value, turn=session.turn)
             context = self.memory.get_relevant_context(session.goal, session.context_budget)
             session.trace.append({"turn": session.turn, "state": session.current_state.value, "context_len": len(context)})
@@ -221,7 +222,7 @@ class TitanHarness:
                 model=self.config.model,
                 provider=self.config.provider,
                 tool_calls_total=tool_calls_total,
-                tool_calls_this_turn=0,
+                tool_calls_this_turn=tool_calls_this_turn,
             )
 
             try:
@@ -309,7 +310,16 @@ class TitanHarness:
                 emit("tool_batch_started", count=len(resp.tool_calls))
                 for tc in resp.tool_calls:
                     tool_calls_total += 1
-                    emit("tool_call", id=tc.id, name=tc.name, arguments=tc.arguments, count=tool_calls_total)
+                    tool_calls_this_turn += 1
+                    emit(
+                        "tool_call",
+                        id=tc.id,
+                        name=tc.name,
+                        arguments=tc.arguments,
+                        count=tool_calls_total,
+                        tool_calls_total=tool_calls_total,
+                        tool_calls_this_turn=tool_calls_this_turn,
+                    )
                     try:
                         self.policy.authorize(tc.name)
                         tr = self.tools.execute(tc.id, tc.name, tc.arguments)
@@ -317,7 +327,15 @@ class TitanHarness:
                         tr = ToolResult(call_id=tc.id, tool_name=tc.name, content=str(e), is_error=True)
                     self._append(history, Message(role=Role.TOOL, content=tr.content, tool_call_id=tr.call_id, tool_name=tr.tool_name, is_error=tr.is_error))
                     results.append(tr)
-                    emit("tool_result", id=tr.call_id, name=tr.tool_name, is_error=tr.is_error, content=tr.content)
+                    emit(
+                        "tool_result",
+                        id=tr.call_id,
+                        name=tr.tool_name,
+                        is_error=tr.is_error,
+                        content=tr.content,
+                        tool_calls_total=tool_calls_total,
+                        tool_calls_this_turn=tool_calls_this_turn,
+                    )
 
                 self.memory.add_tool_results(results)
 

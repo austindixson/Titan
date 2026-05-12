@@ -282,6 +282,37 @@ def test_tui_trace_provider_request_shows_tools_used_not_available(monkeypatch):
     asyncio.run(_run())
 
 
+def test_tui_tool_call_status_uses_harness_per_turn_count(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            app.ui.pending = True
+            app.ui.started_at = 1.0
+            app.on_loop_event_msg(
+                titan_tui_module.LoopEventMsg(
+                    titan_tui_module.AgentEvent(
+                        "tool_call",
+                        {
+                            "id": "c2",
+                            "name": "shell",
+                            "arguments": {"command": "echo two"},
+                            "count": 2,
+                            "tool_calls_total": 2,
+                            "tool_calls_this_turn": 2,
+                        },
+                    )
+                )
+            )
+            status = str(app.query_one("#status_line", titan_tui_module.Static).render())
+            assert "tools_used_this_turn=2" in status
+            assert app.ui.turn_tool_calls == 2
+            assert app.ui.tool_calls == 2
+
+    asyncio.run(_run())
+
+
 def test_tui_provider_selection_prompts_and_saves_missing_api_key(monkeypatch):
     _patch_tui_deps(monkeypatch)
     saved = []

@@ -162,6 +162,37 @@ def test_titan_harness_emits_provider_request_before_blocking_generate(tmp_path:
     assert "tool_count" not in provider_request
 
 
+def test_titan_harness_tool_call_events_include_per_turn_count(tmp_path: Path):
+    script = [
+        AssistantResponse(
+            text="",
+            tool_calls=[
+                ToolCall(id="c1", name="shell", arguments={"command": "echo one"}),
+                ToolCall(id="c2", name="shell", arguments={"command": "echo two"}),
+            ],
+        ),
+        AssistantResponse(text="done"),
+    ]
+    harness = TitanHarness(
+        provider=MockProvider(script=script),
+        tools=default_registry(),
+        config=HarnessConfig(permission_mode="allow"),
+        session_store=SessionStore(str(tmp_path / "session.jsonl")),
+    )
+    events = []
+
+    out = harness.run_with_callback(
+        "build a website",
+        [Message(role=Role.SYSTEM, content="s")],
+        on_event=lambda e: events.append((e.type, e.payload)),
+    )
+
+    assert out.stop.reason == RunStopReason.AssistantFinal
+    tool_calls = [payload for event_type, payload in events if event_type == "tool_call"]
+    assert [payload["tool_calls_this_turn"] for payload in tool_calls] == [1, 2]
+    assert [payload["tool_calls_total"] for payload in tool_calls] == [1, 2]
+
+
 def test_titan_harness_forwards_provider_stream_events_before_final(tmp_path: Path):
     provider = StreamingProvider(AssistantResponse(text="done"))
     harness = TitanHarness(

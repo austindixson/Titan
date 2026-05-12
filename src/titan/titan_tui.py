@@ -666,8 +666,11 @@ class TitanTui(App[None]):
                 self._emit_chat_trace("recovering from empty post-tool turn")
         elif ev.type == "on_state_enter":
             prev_state = self.ui.state
+            prev_turn = self.ui.turn
             self.ui.state = str(ev.payload.get("state", self.ui.state))
             self.ui.turn = int(ev.payload.get("turn", self.ui.turn))
+            if self.ui.turn != prev_turn:
+                self.ui.turn_tool_calls = 0
             self._trace_emit(trace, f"enter {self.ui.state} turn={self.ui.turn}", ev.payload)
             if self.ui.state != prev_state and self._chat_trace_mode() in ("normal", "full"):
                 self._emit_chat_trace(f"state {prev_state} -> {self.ui.state} (turn {self.ui.turn})")
@@ -700,8 +703,8 @@ class TitanTui(App[None]):
             name = str(ev.payload.get("name", ""))
             args = str(ev.payload.get("arguments", ""))
             compact_args = self._compact(args, 120)
-            self.ui.tool_calls += 1
-            self.ui.turn_tool_calls += 1
+            self.ui.tool_calls = int(ev.payload.get("tool_calls_total", ev.payload.get("count", self.ui.tool_calls + 1)))
+            self.ui.turn_tool_calls = int(ev.payload.get("tool_calls_this_turn", self.ui.turn_tool_calls + 1))
             self.ui.pending_tool_count += 1
             if name:
                 self.ui.pending_tool_names.append(name)
