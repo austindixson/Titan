@@ -58,11 +58,11 @@ def test_tui_focus_input_hotkey_moves_off_ctrl_o(monkeypatch):
     assert ("ctrl+o", "operator_input") not in bindings
 
 
-def test_tui_ctrl_c_closes_current_titan_instance_not_entire_app(monkeypatch):
+def test_tui_ctrl_c_cancels_then_quits(monkeypatch):
     _patch_tui_deps(monkeypatch)
     bindings = {(binding[0], binding[1], binding[2]) for binding in TitanTui.BINDINGS}
 
-    assert ("ctrl+c", "close_titan_instance", "Close Titan") in bindings
+    assert ("ctrl+c", "handle_ctrl_c", "Cancel/Quit") in bindings
     assert ("ctrl+c", "quit", "Quit") not in bindings
 
     async def _run():
@@ -77,12 +77,15 @@ def test_tui_ctrl_c_closes_current_titan_instance_not_entire_app(monkeypatch):
             monkeypatch.setattr(app, "exit", fake_exit)
             app.ui.pending = True
             app.ui.pending_tool_names.append("shell")
-            app.action_close_titan_instance()
 
+            app.action_handle_ctrl_c()
             assert exit_called is False
             assert app.ui.pending is False
             assert app.ui.pending_tool_names == []
-            assert str(app.query_one("#assistant_line", titan_tui_module.Static).render()) == "Titan: instance closed"
+            assert app.ctrl_c_quit_armed is True
+
+            app.action_handle_ctrl_c()
+            assert exit_called is True
 
     asyncio.run(_run())
 
@@ -121,24 +124,62 @@ def test_tui_trace_tab_click_expands_over_chat_and_click_again_minimizes(monkeyp
             trace = app.query_one("#trace", titan_tui_module.SelectableRichLog)
 
             assert app.active_top_tab == "trace"
-            assert app.trace_expanded is False
+            assert app.top_tab_expanded is False
             assert top.has_class("expanded") is False
             assert output.display is True
             assert trace.display is True
 
             await pilot.click("#tab-trace")
             await pilot.pause()
-            assert app.trace_expanded is True
+            assert app.top_tab_expanded is True
             assert top.has_class("expanded") is True
             assert output.has_class("trace-hidden") is True
             assert str(app.query_one("#tab-trace", Button).label) == "Trace ▾"
 
             await pilot.click("#tab-trace")
             await pilot.pause()
-            assert app.trace_expanded is False
+            assert app.top_tab_expanded is False
             assert top.has_class("expanded") is False
             assert output.has_class("trace-hidden") is False
             assert str(app.query_one("#tab-trace", Button).label) == "Trace ●"
+
+    asyncio.run(_run())
+
+
+def test_tui_diff_tab_click_expands_over_chat_and_click_again_minimizes(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        monkeypatch.setattr(app, "_collect_git_diff", lambda: "diff --git a/a b/a\n-old\n+new")
+        async with app.run_test(size=(100, 32)) as pilot:
+            top = app.query_one("#top")
+            output = app.query_one("#output", titan_tui_module.SelectableRichLog)
+
+            assert app.active_top_tab == "trace"
+            assert app.top_tab_expanded is False
+
+            await pilot.click("#tab-diff")
+            await pilot.pause()
+            assert app.active_top_tab == "diff"
+            assert app.top_tab_expanded is False
+            assert top.has_class("expanded") is False
+            assert output.has_class("trace-hidden") is False
+            assert str(app.query_one("#tab-diff", Button).label) == "Diff ●"
+
+            await pilot.click("#tab-diff")
+            await pilot.pause()
+            assert app.top_tab_expanded is True
+            assert top.has_class("expanded") is True
+            assert output.has_class("trace-hidden") is True
+            assert str(app.query_one("#tab-diff", Button).label) == "Diff ▾"
+
+            await pilot.click("#tab-diff")
+            await pilot.pause()
+            assert app.top_tab_expanded is False
+            assert top.has_class("expanded") is False
+            assert output.has_class("trace-hidden") is False
+            assert str(app.query_one("#tab-diff", Button).label) == "Diff ●"
 
     asyncio.run(_run())
 
@@ -267,7 +308,7 @@ def test_tui_up_cycles_previous_sent_messages(monkeypatch):
     asyncio.run(_run())
 
 
-def test_tui_trace_renders_provider_stream_delta(monkeypatch):
+def test_tui_trace_suppresses_provider_stream_delta(monkeypatch):
     _patch_tui_deps(monkeypatch)
 
     async def _run():
@@ -278,12 +319,12 @@ def test_tui_trace_renders_provider_stream_delta(monkeypatch):
                     titan_tui_module.AgentEvent("provider_stream_delta", {"text": "hello", "kind": "text"})
                 )
             )
-            assert any("stream hello" in line for line in app.trace_lines)
+            assert not any("stream hello" in line for line in app.trace_lines)
 
     asyncio.run(_run())
 
 
-def test_tui_trace_provider_request_shows_tools_used_not_available(monkeypatch):
+def test_tui_trace_provider_request_is_suppressed(monkeypatch):
     _patch_tui_deps(monkeypatch)
 
     async def _run():
@@ -302,11 +343,32 @@ def test_tui_trace_provider_request_shows_tools_used_not_available(monkeypatch):
                     )
                 )
             )
-            request_lines = [line for line in app.trace_lines if line.startswith("provider request")]
-            assert request_lines == ["provider request iteration=1 state=PLAN tools_used_this_turn=0"]
-            assert "tools_available" not in request_lines[0]
-            assert "write_file" not in request_lines[0]
-            assert "terminal" not in request_lines[0]
+            request_lines = [line for line in app.trace_lines if line == "request"]
+            assert request_lines == []
+
+    asyncio.run(_run())
+
+
+def test_tui_trace_state_events_are_suppressed(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            app.on_loop_event_msg(
+                titan_tui_module.LoopEventMsg(
+                    titan_tui_module.AgentEvent("on_state_enter", {"state": "REFLECT", "turn": 5})
+                )
+            )
+            app.on_loop_event_msg(
+                titan_tui_module.LoopEventMsg(
+                    titan_tui_module.AgentEvent("on_transition", {"from_state": "REFLECT", "to_state": "ACT", "turn": 5})
+                )
+            )
+            assert "REFLECT" not in app.trace_lines
+            assert "ACT" not in app.trace_lines
+            assert not any(line.startswith("enter ") for line in app.trace_lines)
+            assert not any(line.startswith("transition ") for line in app.trace_lines)
 
     asyncio.run(_run())
 
@@ -342,6 +404,33 @@ def test_tui_tool_call_status_uses_harness_per_turn_count(monkeypatch):
     asyncio.run(_run())
 
 
+def test_tui_trace_tool_call_shows_compact_label_and_counter(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            app.ui.pending = True
+            app.ui.started_at = 1.0
+            app.on_loop_event_msg(
+                titan_tui_module.LoopEventMsg(
+                    titan_tui_module.AgentEvent(
+                        "tool_call",
+                        {
+                            "id": "c1",
+                            "name": "read_file",
+                            "arguments": {"path": "/Users/ghost/Desktop/Titan/tests/test_titan_tui.py"},
+                            "tool_calls_total": 3,
+                            "tool_calls_this_turn": 2,
+                        },
+                    )
+                )
+            )
+            assert any("📖 read" in line and "test_titan_tui.py" in line and "[2/3]" in line for line in app.trace_lines)
+
+    asyncio.run(_run())
+
+
 def test_tui_progress_updates_chat_on_phase_transition_with_recaps_disabled(monkeypatch):
     _patch_tui_deps(monkeypatch)
 
@@ -363,9 +452,7 @@ def test_tui_progress_updates_chat_on_phase_transition_with_recaps_disabled(monk
                 )
             )
             progress_lines = [line for line in app.chat_lines if line.startswith("progress>")]
-            assert progress_lines
-            assert "finished ACT and moved to REFLECT" in progress_lines[-1]
-            assert "total tools 3" in progress_lines[-1]
+            assert not progress_lines
             assert not any(line.startswith("trace>") for line in app.chat_lines)
 
     asyncio.run(_run())
@@ -393,8 +480,7 @@ def test_tui_progress_updates_are_periodic_and_throttled(monkeypatch):
             now["value"] = 116.0
             app._tick()
             progress_lines = [line for line in app.chat_lines if line.startswith("progress>")]
-            assert len(progress_lines) == 1
-            assert "running tests" in progress_lines[0]
+            assert not progress_lines
 
     asyncio.run(_run())
 
@@ -421,9 +507,7 @@ def test_tui_progress_updates_chat_on_same_state_part_completion(monkeypatch):
                 )
             )
             progress_lines = [line for line in app.chat_lines if line.startswith("progress>")]
-            assert progress_lines
-            assert "finished REFLECT and moved to REFLECT" in progress_lines[-1]
-            assert "total tools 8" in progress_lines[-1]
+            assert not progress_lines
 
     asyncio.run(_run())
 
@@ -452,8 +536,7 @@ def test_tui_progress_updates_chat_before_budget_stop_final(monkeypatch):
             )
             app.on_loop_done_msg(titan_tui_module.LoopDoneMsg(out))
             progress_lines = [line for line in app.chat_lines if line.startswith("progress>")]
-            assert progress_lines
-            assert "run stopped at BudgetIterations" in progress_lines[-1]
+            assert not progress_lines
             assert app.chat_lines[-1].startswith("Titan: Summary:\n- Paused cleanly at the configured iteration ceiling")
             assert "Stopped: BudgetIterations" not in app.chat_lines[-1]
 
