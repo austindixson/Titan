@@ -27,6 +27,8 @@ def test_tui_controls_are_limited_to_stop_provider_operator_trace_quit(monkeypat
                 for button in app.query(Button)
             }
             assert labels == {
+                "tab-trace": "Trace ●",
+                "tab-diff": "Diff",
                 "btn-stop": "Stop",
                 "btn-provider": "Provider: openai",
                 "btn-operator": "Operator",
@@ -44,6 +46,39 @@ def test_tui_trace_defaults_compact_and_small(monkeypatch):
 
     assert app.trace_verbosity_levels[app.trace_verbosity_index] == "compact"
     assert "#top {\n        height: 6;\n        min-height: 6;" in app.CSS
+
+
+def test_tui_top_panel_tabs_switch_trace_and_diff(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        monkeypatch.setattr(app, "_collect_git_diff", lambda: "diff --git a/a b/a\n-old\n+new")
+        async with app.run_test(size=(100, 32)):
+            trace = app.query_one("#trace", titan_tui_module.SelectableRichLog)
+            diff = app.query_one("#diff", titan_tui_module.SelectableRichLog)
+            assert app.active_top_tab == "trace"
+            assert trace.display is True
+            assert diff.display is False
+
+            app._set_top_tab("diff")
+            assert app.active_top_tab == "diff"
+            assert trace.display is False
+            assert diff.display is True
+            assert app.diff_lines == ["diff --git a/a b/a", "-old", "+new"]
+            assert str(app.query_one("#tab-diff", Button).label) == "Diff ●"
+
+    asyncio.run(_run())
+
+
+def test_tui_diff_lines_are_color_coded(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+    app = TitanTui()
+
+    assert str(app._style_diff_line("+added").style) == "green"
+    assert str(app._style_diff_line("-removed").style) == "red"
+    assert str(app._style_diff_line("@@ -1 +1 @@").style) == "bold cyan"
+    assert str(app._style_diff_line("diff --git a/a b/a").style) == "bold magenta"
 
 
 def test_tui_input_uses_wrapping_text_area(monkeypatch):

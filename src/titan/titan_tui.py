@@ -86,6 +86,7 @@ class ComposerTextArea(TextArea):
 class TitanTui(App[None]):
     BINDINGS = [
         ("ctrl+t", "copy_trace", "Copy trace"),
+        ("ctrl+d", "toggle_top_tab", "Trace/Diff"),
         ("ctrl+y", "copy_chat", "Copy chat"),
         ("ctrl+o", "operator_input", "Focus input"),
         ("ctrl+r", "toggle_trace_verbosity", "Trace mode"),
@@ -100,7 +101,27 @@ class TitanTui(App[None]):
         height: 6;
         min-height: 6;
     }
+    #top_tabs {
+        height: 1;
+        padding: 0 1;
+    }
+    #top_tabs Button {
+        width: auto;
+        height: 1;
+        min-width: 7;
+        margin-right: 1;
+        padding: 0 1;
+        border: none;
+        background: #202124;
+        color: #9aa0a6;
+        text-style: bold;
+    }
+    #top_tabs Button.active-tab {
+        background: #263238;
+        color: #ffffff;
+    }
     #trace { height: 1fr; border: solid #3a3a3a; }
+    #diff { height: 1fr; border: solid #3a3a3a; }
     #output {
         height: 1fr;
         min-height: 10;
@@ -163,12 +184,18 @@ class TitanTui(App[None]):
         self.trace_verbosity_index = 0
         self.plan_shown_this_run = False
         self.trace_lines: list[str] = []
+        self.diff_lines: list[str] = []
         self.chat_lines: list[str] = []
+        self.active_top_tab = "trace"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Container(id="top"):
+            with Horizontal(id="top_tabs"):
+                yield Button("Trace", id="tab-trace")
+                yield Button("Diff", id="tab-diff")
             yield SelectableRichLog(id="trace", wrap=True)
+            yield SelectableRichLog(id="diff", wrap=True)
         yield SelectableRichLog(id="output", wrap=True)
         with Horizontal(id="controls"):
             yield Button("Stop", id="btn-stop")
@@ -190,6 +217,8 @@ class TitanTui(App[None]):
 
     def on_mount(self) -> None:
         self.query_one("#trace", SelectableRichLog).write_selectable("trace ready")
+        self._refresh_diff_tab()
+        self._set_top_tab("trace")
         self.query_one("#input", ComposerTextArea).focus()
         self._apply_responsive_layout(self.size.width)
         self._refresh_status()
@@ -213,6 +242,74 @@ class TitanTui(App[None]):
 
         provider = self.harness.config.provider
         self.query_one("#btn-provider", Button).label = f"Provider: {provider}"
+        self._refresh_top_tab_labels()
+
+    def _refresh_top_tab_labels(self) -> None:
+        try:
+            trace_tab = self.query_one("#tab-trace", Button)
+            diff_tab = self.query_one("#tab-diff", Button)
+        except NoMatches:
+            return
+        trace_tab.label = "Trace" if self.active_top_tab != "trace" else "Trace ●"
+        diff_tab.label = "Diff" if self.active_top_tab != "diff" else "Diff ●"
+        trace_tab.set_class(self.active_top_tab == "trace", "active-tab")
+        diff_tab.set_class(self.active_top_tab == "diff", "active-tab")
+
+    def _set_top_tab(self, tab: str) -> None:
+        if tab not in {"trace", "diff"}:
+            return
+        self.active_top_tab = tab
+        try:
+            trace = self.query_one("#trace", SelectableRichLog)
+            diff = self.query_one("#diff", SelectableRichLog)
+        except NoMatches:
+            return
+        trace.display = tab == "trace"
+        diff.display = tab == "diff"
+        if tab == "diff":
+            self._refresh_diff_tab()
+        self._refresh_top_tab_labels()
+
+    def _style_diff_line(self, line: str) -> Text:
+        if line.startswith("+") and not line.startswith("+++"):
+            return Text(line, style="green")
+        if line.startswith("-") and not line.startswith("---"):
+            return Text(line, style="red")
+        if line.startswith("@@"):
+            return Text(line, style="bold cyan")
+        if line.startswith("diff --git"):
+            return Text(line, style="bold magenta")
+        if line.startswith("+++") or line.startswith("---"):
+            return Text(line, style="yellow")
+        return Text(line, style="dim") if line.startswith(" ") else Text(line)
+
+    def _collect_git_diff(self) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--no-ext-diff", "--"],
+                cwd=".",
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception as e:
+            return f"diff unavailable: {e}"
+        if result.returncode != 0:
+            return (result.stderr or result.stdout or "diff unavailable").strip()
+        return result.stdout.strip() or "No working-tree diff."
+
+    def _refresh_diff_tab(self) -> None:
+        try:
+            diff = self.query_one("#diff", SelectableRichLog)
+        except NoMatches:
+            return
+        text = self._collect_git_diff()
+        self.diff_lines = text.splitlines() or ["No working-tree diff."]
+        diff.clear()
+        diff.selection_lines.clear()
+        for line in self.diff_lines:
+            diff.write_selectable(self._style_diff_line(line), line)
 
     def _tick(self) -> None:
         if self.ui.pending:
@@ -490,6 +587,8 @@ class TitanTui(App[None]):
                 self._emit_chat_trace(
                     f"tool-result {name or 'unknown'} {'ERR' if is_error else 'OK'} {compact_content}"
                 )
+            if self.active_top_tab == "diff":
+                self._refresh_diff_tab()
         elif ev.type == "on_skill_created":
             self._trace_emit(trace, f"skill-created {ev.payload.get('path')}", ev.payload)
 
@@ -542,6 +641,8 @@ class TitanTui(App[None]):
         completion_line = f"completed stop={out.stop.reason.value} iter={out.stop.iterations} tools={out.stop.tool_calls_total}"
         self.trace_lines.append(completion_line)
         self._write_trace(completion_line)
+        if self.active_top_tab == "diff":
+            self._refresh_diff_tab()
 
         self.ui.pending = False
         self.ui.started_at = None
@@ -560,6 +661,10 @@ class TitanTui(App[None]):
         self._apply_responsive_layout(self.size.width)
         self._write_trace(f"trace verbosity -> {mode}")
         self.query_one("#btn-trace", Button).label = f"Trace: {mode}"
+        self._refresh_status()
+
+    def action_toggle_top_tab(self) -> None:
+        self._set_top_tab("diff" if self.active_top_tab == "trace" else "trace")
         self._refresh_status()
 
     def action_copy_trace(self) -> None:
@@ -585,6 +690,10 @@ class TitanTui(App[None]):
         bid = event.button.id
         if bid == "btn-stop":
             self.action_stop()
+        elif bid == "tab-trace":
+            self._set_top_tab("trace")
+        elif bid == "tab-diff":
+            self._set_top_tab("diff")
         elif bid == "btn-operator":
             self.action_operator_input()
         elif bid == "btn-trace":

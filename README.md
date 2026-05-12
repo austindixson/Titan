@@ -133,6 +133,7 @@ TUI controls:
 - Shift+Up/Down: fine scroll
 - PgUp/PgDn: fast scroll
 - Ctrl+Home/Ctrl+End: top/bottom
+- Ctrl+D: switch top panel between Trace and Diff
 - Ctrl+L: clear transcript
 
 ## Run minimal TUI demo (mock)
