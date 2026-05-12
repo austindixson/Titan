@@ -268,7 +268,7 @@ def test_tui_chat_output_is_boxed_and_brevity_limited(monkeypatch):
     asyncio.run(_run())
 
 
-def test_tui_user_messages_are_bold_text_without_panel_border(monkeypatch):
+def test_tui_user_messages_are_bold_bullets_without_label_or_color(monkeypatch):
     _patch_tui_deps(monkeypatch)
     app = TitanTui()
 
@@ -276,8 +276,11 @@ def test_tui_user_messages_are_bold_text_without_panel_border(monkeypatch):
 
     assert isinstance(renderable, Text)
     assert not isinstance(renderable, Panel)
-    assert "bold" in str(renderable.style)
-    assert "describe this image" in renderable.plain
+    assert str(renderable.style) == "bold"
+    assert renderable.plain == "• describe this image"
+    assert app._chat_plain_text("You", "describe this image") == "• describe this image"
+    assert "You" not in renderable.plain
+    assert "cyan" not in str(renderable.style)
 
 
 def test_tui_chat_truncation_prefers_finished_sentence_with_grace(monkeypatch):

@@ -443,7 +443,7 @@ class TitanTui(App[None]):
 
     def _chat_renderable(self, speaker: str, body: str, border_style: str):
         if speaker == "You":
-            return Text(f"{speaker}\n{body}", style=f"bold {border_style}")
+            return Text(f"• {body}", style="bold")
         return Panel(
             Text(body),
             title=speaker,
@@ -453,12 +453,16 @@ class TitanTui(App[None]):
             padding=(0, 1),
         )
 
+    def _chat_plain_text(self, speaker: str, body: str) -> str:
+        return f"• {body}" if speaker == "You" else f"{speaker}: {body}"
+
     def _write_chat_box(self, speaker: str, text: str, border_style: str) -> None:
         body = self._brief_chat_text(text)
-        self.chat_lines.append(f"{speaker}: {body}")
+        plain = self._chat_plain_text(speaker, body)
+        self.chat_lines.append(plain)
         self.query_one("#output", SelectableRichLog).write_selectable(
             self._chat_renderable(speaker, body, border_style),
-            f"{speaker}: {body}",
+            plain,
         )
 
     def _write_chat_plain(self, text: str) -> None:
