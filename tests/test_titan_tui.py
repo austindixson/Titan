@@ -370,6 +370,66 @@ def test_tui_progress_updates_are_periodic_and_throttled(monkeypatch):
     asyncio.run(_run())
 
 
+def test_tui_progress_updates_chat_on_same_state_part_completion(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            app.harness.config.chat_recaps_enabled = False
+            app.ui.pending = True
+            app.ui.started_at = 1.0
+            app.ui.state = "REFLECT"
+            app.ui.turn = 4
+            app.ui.tool_calls = 8
+            app._record_progress_event("finished tool read_file successfully")
+            app.on_loop_event_msg(
+                titan_tui_module.LoopEventMsg(
+                    titan_tui_module.AgentEvent(
+                        "on_transition",
+                        {"from_state": "REFLECT", "to_state": "REFLECT", "turn": 4},
+                    )
+                )
+            )
+            progress_lines = [line for line in app.chat_lines if line.startswith("progress>")]
+            assert progress_lines
+            assert "finished REFLECT and moved to REFLECT" in progress_lines[-1]
+            assert "total tools 8" in progress_lines[-1]
+
+    asyncio.run(_run())
+
+
+def test_tui_progress_updates_chat_before_budget_stop_final(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            app.ui.pending = True
+            app.ui.started_at = 1.0
+            app.ui.state = "REFLECT"
+            app.ui.turn = 16
+            app.ui.tool_calls = 22
+            app._record_progress_event("finished tool shell successfully")
+            out = RunOutcome(
+                text="",
+                stop=RunStopContract(
+                    reason=RunStopReason.BudgetIterations,
+                    iterations=16,
+                    tool_calls_total=22,
+                    elapsed_ms=1200,
+                    notes="max_iterations",
+                ),
+            )
+            app.on_loop_done_msg(titan_tui_module.LoopDoneMsg(out))
+            progress_lines = [line for line in app.chat_lines if line.startswith("progress>")]
+            assert progress_lines
+            assert "run stopped at BudgetIterations" in progress_lines[-1]
+            assert app.chat_lines[-1] == "Titan: Stopped: BudgetIterations (max_iterations)"
+
+    asyncio.run(_run())
+
+
 def test_tui_provider_selection_prompts_and_saves_missing_api_key(monkeypatch):
     _patch_tui_deps(monkeypatch)
     saved = []

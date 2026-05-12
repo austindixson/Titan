@@ -733,8 +733,7 @@ class TitanTui(App[None]):
             to_state = ev.payload.get("to_state")
             self._record_progress_event(f"finished {from_state} and moved to {to_state}")
             self._trace_emit(trace, f"transition {from_state} -> {to_state}", ev.payload)
-            if from_state != to_state:
-                self._maybe_emit_progress_update(force=True)
+            self._maybe_emit_progress_update(force=True)
         elif ev.type == "assistant_message":
             text = str(ev.payload.get("text", "")).strip()
             if text:
@@ -847,6 +846,10 @@ class TitanTui(App[None]):
 
         final_text = out.text.strip() if out.text.strip() else f"Stopped: {out.stop.reason.value} ({out.stop.notes or 'no details'})"
         final_text = self._with_final_summary(final_text, out)
+        self._record_progress_event(
+            f"run stopped at {out.stop.reason.value} after {out.stop.iterations} turns and {out.stop.tool_calls_total} tools"
+        )
+        self._maybe_emit_progress_update(force=True)
         self._flush_tool_summary_to_chat()
         self._write_chat_box("Titan", final_text, "green")
         self.query_one("#assistant_line", Static).update(f"Titan: {self._compact(final_text, 180)}")
