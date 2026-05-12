@@ -157,7 +157,9 @@ def test_titan_harness_emits_provider_request_before_blocking_generate(tmp_path:
     provider_request = [payload for event_type, payload in events if event_type == "provider_request"][0]
     assert provider_request["iteration"] == 1
     assert provider_request["state"] == OrchestratorState.PLAN.value
-    assert provider_request["tool_count"] == len(default_registry().definitions())
+    assert provider_request["tool_calls_total"] == 0
+    assert provider_request["tool_calls_this_turn"] == 0
+    assert "tool_count" not in provider_request
 
 
 def test_titan_harness_forwards_provider_stream_events_before_final(tmp_path: Path):

@@ -61,7 +61,8 @@ chmod +x "$BIN_DIR/titan-tui"
 "$BIN_DIR/titan" config set chat_recaps_enabled false >/dev/null || true
 
 log "installed Titan"
-log "binaries: $BIN_DIR/titan and $BIN_DIR/titan-tui"
+log "launch: $BIN_DIR/titan"
+log "optional legacy launcher: $BIN_DIR/titan-tui"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) log "add this to your shell profile if needed: export PATH=\"$BIN_DIR:\$PATH\"" ;;

@@ -1,6 +1,6 @@
 # Installing Titan
 
-Titan is a Python CLI/TUI agent harness. The installer creates an isolated virtual environment under `~/.titan/venv`, installs Titan, creates `titan` and `titan-tui` launcher scripts under `~/.local/bin`, and writes the default config with chat recaps disabled.
+Titan is a Python CLI/TUI agent harness. The installer creates an isolated virtual environment under `~/.titan/venv`, installs Titan, creates `titan` and `titan-tui` launcher scripts under `~/.local/bin`, and writes the default config with chat recaps disabled. Run `titan` with no subcommand to launch the full-screen TUI.
 
 ## macOS / Linux
 
@@ -43,7 +43,7 @@ If `%USERPROFILE%\.local\bin` is not on your PATH, add it in Windows Environment
 ```bash
 titan doctor
 titan config show
-titan-tui
+titan
 ```
 
 ## Configure provider credentials

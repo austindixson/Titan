@@ -1,7 +1,7 @@
 from titan.titan_cli import cmd_doctor
 
 
-def test_doctor_ok_when_tui_present_and_venv_matches(monkeypatch, tmp_path):
+def test_doctor_ok_when_titan_present_and_venv_matches(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("VIRTUAL_ENV", str((tmp_path / ".venv").resolve()))
 
@@ -16,7 +16,7 @@ def test_doctor_ok_when_tui_present_and_venv_matches(monkeypatch, tmp_path):
     assert cmd_doctor() == 0
 
 
-def test_doctor_fails_when_tui_missing(monkeypatch, tmp_path):
+def test_doctor_ok_when_titan_tui_missing(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("VIRTUAL_ENV", str((tmp_path / ".venv").resolve()))
 
@@ -26,4 +26,4 @@ def test_doctor_fails_when_tui_missing(monkeypatch, tmp_path):
         return None
 
     monkeypatch.setattr("shutil.which", _which)
-    assert cmd_doctor() == 1
+    assert cmd_doctor() == 0

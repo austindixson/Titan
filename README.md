@@ -125,7 +125,7 @@ Local CI script:
 ## Run full-screen TUI
 
 titan doctor
-titan-tui
+titan
 
 TUI controls:
 - Enter: send
@@ -134,6 +134,7 @@ TUI controls:
 - PgUp/PgDn: fast scroll
 - Ctrl+Home/Ctrl+End: top/bottom
 - Ctrl+D: switch top panel between Trace and Diff
+- Ctrl+F: focus input
 - Ctrl+L: clear transcript
 
 ## Run minimal TUI demo (mock)

@@ -220,7 +220,8 @@ class TitanHarness:
                 state=session.current_state.value,
                 model=self.config.model,
                 provider=self.config.provider,
-                tool_count=len(tools),
+                tool_calls_total=tool_calls_total,
+                tool_calls_this_turn=0,
             )
 
             try:

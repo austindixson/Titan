@@ -449,10 +449,10 @@ def cmd_doctor() -> int:
     titan_bin = shutil.which("titan")
     titan_tui_bin = shutil.which("titan-tui")
     c.print(f"which titan={titan_bin or '(not found)'}")
-    c.print(f"which titan-tui={titan_tui_bin or '(not found)'}")
+    c.print(f"which titan-tui={titan_tui_bin or '(optional; not found)'}")
 
-    if not titan_tui_bin:
-        problems.append("titan-tui not found in PATH")
+    if not titan_bin:
+        problems.append("titan not found in PATH")
 
     if problems:
         c.print("\nDoctor status: FAIL")
@@ -470,6 +470,12 @@ def cmd_doctor() -> int:
 
 
 def main() -> None:
+    if len(sys.argv) == 1:
+        from .titan_tui import run as run_tui
+
+        run_tui()
+        return
+
     parser = argparse.ArgumentParser(prog="titan")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

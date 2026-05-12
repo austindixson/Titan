@@ -33,6 +33,7 @@ class UiState:
     state: str = "PLAN"
     turn: int = 0
     tool_calls: int = 0
+    turn_tool_calls: int = 0
     thinking_dots: int = 0
     pending_tool_names: list[str] = field(default_factory=list)
     pending_tool_count: int = 0
@@ -88,7 +89,7 @@ class TitanTui(App[None]):
         ("ctrl+t", "copy_trace", "Copy trace"),
         ("ctrl+d", "toggle_top_tab", "Trace/Diff"),
         ("ctrl+y", "copy_chat", "Copy chat"),
-        ("ctrl+o", "operator_input", "Focus input"),
+        ("ctrl+f", "operator_input", "Focus input"),
         ("ctrl+r", "toggle_trace_verbosity", "Trace mode"),
         ("ctrl+p", "cycle_provider", "Provider"),
         ("ctrl+g", "stop", "Stop"),
@@ -415,7 +416,7 @@ class TitanTui(App[None]):
         status = (
             f"state={self.ui.state} "
             f"turn={self.ui.turn}/{self.harness.config.max_iterations} "
-            f"tools={self.ui.tool_calls} "
+            f"tools_used_this_turn={self.ui.turn_tool_calls} "
             f"provider={self.harness.config.provider} "
             f"thinking={'yes' if self.ui.pending else 'no'}({timer}) "
             f"trace={self.trace_verbosity_levels[self.trace_verbosity_index]}"
@@ -461,6 +462,7 @@ class TitanTui(App[None]):
         self.ui.pending = True
         self.ui.started_at = time.time()
         self.ui.tool_calls = 0
+        self.ui.turn_tool_calls = 0
         self.ui.turn = 0
         self.ui.state = "PLAN"
         self.ui.thinking_dots = 0
@@ -491,13 +493,15 @@ class TitanTui(App[None]):
             self._trace_emit(trace, f"route {state}: {reason}", ev.payload)
         elif ev.type == "iteration_started":
             self.ui.turn = int(ev.payload.get("iteration", self.ui.turn))
+            self.ui.turn_tool_calls = 0
             self._trace_emit(trace, f"iteration {self.ui.turn}", ev.payload)
         elif ev.type == "provider_request":
             self._trace_emit(
                 trace,
                 (
                     f"provider request iteration={ev.payload.get('iteration')} "
-                    f"state={ev.payload.get('state')} tools_available={ev.payload.get('tool_count')}"
+                    f"state={ev.payload.get('state')} "
+                    f"tools_used_this_turn={ev.payload.get('tool_calls_this_turn', self.ui.turn_tool_calls)}"
                 ),
                 ev.payload,
             )
@@ -556,6 +560,8 @@ class TitanTui(App[None]):
             name = str(ev.payload.get("name", ""))
             args = str(ev.payload.get("arguments", ""))
             compact_args = self._compact(args, 120)
+            self.ui.tool_calls += 1
+            self.ui.turn_tool_calls += 1
             self.ui.pending_tool_count += 1
             if name:
                 self.ui.pending_tool_names.append(name)
@@ -573,7 +579,6 @@ class TitanTui(App[None]):
                 ev.payload,
             )
         elif ev.type == "tool_result":
-            self.ui.tool_calls += 1
             name = str(ev.payload.get("name", ""))
             is_error = bool(ev.payload.get("is_error"))
             content = str(ev.payload.get("content", "")).strip()

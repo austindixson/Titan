@@ -48,6 +48,14 @@ def test_tui_trace_defaults_compact_and_small(monkeypatch):
     assert "#top {\n        height: 6;\n        min-height: 6;" in app.CSS
 
 
+def test_tui_focus_input_hotkey_moves_off_ctrl_o(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+    bindings = {(binding[0], binding[1]) for binding in TitanTui.BINDINGS}
+
+    assert ("ctrl+f", "operator_input") in bindings
+    assert ("ctrl+o", "operator_input") not in bindings
+
+
 def test_tui_top_panel_tabs_switch_trace_and_diff(monkeypatch):
     _patch_tui_deps(monkeypatch)
 
@@ -126,7 +134,7 @@ def test_tui_trace_renders_provider_stream_delta(monkeypatch):
     asyncio.run(_run())
 
 
-def test_tui_trace_provider_request_omits_full_tool_inventory(monkeypatch):
+def test_tui_trace_provider_request_shows_tools_used_not_available(monkeypatch):
     _patch_tui_deps(monkeypatch)
 
     async def _run():
@@ -139,14 +147,15 @@ def test_tui_trace_provider_request_omits_full_tool_inventory(monkeypatch):
                         {
                             "iteration": 1,
                             "state": "PLAN",
-                            "tool_count": 2,
+                            "tool_calls_this_turn": 0,
                             "tools": ["write_file", "terminal"],
                         },
                     )
                 )
             )
             request_lines = [line for line in app.trace_lines if line.startswith("provider request")]
-            assert request_lines == ["provider request iteration=1 state=PLAN tools_available=2"]
+            assert request_lines == ["provider request iteration=1 state=PLAN tools_used_this_turn=0"]
+            assert "tools_available" not in request_lines[0]
             assert "write_file" not in request_lines[0]
             assert "terminal" not in request_lines[0]
 

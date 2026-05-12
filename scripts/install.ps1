@@ -60,7 +60,8 @@ Set-Content -Path $TitanTuiCmd -Value "@echo off`r`n`"$TitanTuiExe`" %*`r`n" -En
 & $TitanExe config set chat_recaps_enabled false | Out-Null
 
 Log 'installed Titan'
-Log "binaries: $TitanCmd and $TitanTuiCmd"
+Log "launch: $TitanCmd"
+Log "optional legacy launcher: $TitanTuiCmd"
 if (-not (($env:PATH -split ';') -contains $BinDir)) {
   Log "add this folder to PATH if needed: $BinDir"
 }
