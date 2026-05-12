@@ -11,6 +11,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal
 from textual import events
+from textual.css.query import NoMatches
 from textual.message import Message as TextualMessage
 from textual.widgets import Button, Footer, Header, RichLog, Static, TextArea
 
@@ -217,7 +218,10 @@ class TitanTui(App[None]):
         if self.ui.pending:
             self.ui.thinking_dots = (self.ui.thinking_dots + 1) % 4
             dots = "." * (self.ui.thinking_dots + 1)
-            self.query_one("#assistant_line", Static).update(f"Titan: thinking{dots}")
+            try:
+                self.query_one("#assistant_line", Static).update(f"Titan: thinking{dots}")
+            except NoMatches:
+                return
         self._refresh_status()
 
     def _trace_emit(self, trace: RichLog, line: str, payload: dict | None = None) -> None:
@@ -319,7 +323,10 @@ class TitanTui(App[None]):
             f"thinking={'yes' if self.ui.pending else 'no'}({timer}) "
             f"trace={self.trace_verbosity_levels[self.trace_verbosity_index]}"
         )
-        self.query_one("#status_line", Static).update(status)
+        try:
+            self.query_one("#status_line", Static).update(status)
+        except NoMatches:
+            return
 
     async def on_composer_text_area_submitted(self, event: ComposerTextArea.Submitted) -> None:
         composer = self.query_one("#input", ComposerTextArea)
