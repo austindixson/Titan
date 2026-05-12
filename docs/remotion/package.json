@@ -1,0 +1,20 @@
+{
+  "name": "readme-visuals",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "compositions": "remotion compositions src/index.tsx",
+    "render:install": "remotion still src/index.tsx InstallFlow ../assets/install-flow.png",
+    "render:setup": "remotion still src/index.tsx SetupFlow ../assets/setup-flow.png",
+    "render:all": "npm run render:install && npm run render:setup"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.273"
+  },
+  "devDependencies": {
+    "@remotion/cli": "^4.0.273",
+    "typescript": "^5.6.3"
+  }
+}

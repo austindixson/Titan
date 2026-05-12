@@ -46,3 +46,4 @@ Thumbs.db
 # Logs
 *.log
 logs/
+docs/remotion/node_modules/
