@@ -302,7 +302,7 @@ def test_tui_trace_shows_rejected_tool_calls(monkeypatch):
     asyncio.run(_run())
 
 
-def test_tui_chat_output_is_boxed_and_brevity_limited(monkeypatch):
+def test_tui_chat_output_is_boxed_and_not_truncated(monkeypatch):
     _patch_tui_deps(monkeypatch)
 
     async def _run():
@@ -314,8 +314,8 @@ def test_tui_chat_output_is_boxed_and_brevity_limited(monkeypatch):
             assert app.chat_lines
             assert "Titan:" in app.chat_lines[-1]
             assert "line 0" in app.chat_lines[-1]
-            assert "line 12" not in app.chat_lines[-1]
-            assert "truncated in chat" in app.chat_lines[-1]
+            assert "line 19" in app.chat_lines[-1]
+            assert "truncated in chat" not in app.chat_lines[-1]
             assert output.selection_lines[-1] == app.chat_lines[-1]
 
     asyncio.run(_run())
@@ -336,18 +336,18 @@ def test_tui_user_messages_are_bold_bullets_without_label_or_color(monkeypatch):
     assert "cyan" not in str(renderable.style)
 
 
-def test_tui_chat_truncation_prefers_finished_sentence_with_grace(monkeypatch):
+def test_tui_chat_keeps_full_text_even_past_old_sentence_grace(monkeypatch):
     _patch_tui_deps(monkeypatch)
     app = TitanTui()
     first = "This is the first complete sentence about the image."
     second = " It adds a useful final detail that should be allowed to finish."
     over = " extra" * 100
+    full = first + second + over
 
-    brief = app._brief_chat_text(first + second + over, max_chars=len(first) + 8, max_lines=20, grace_chars=len(second) + 5)
+    brief = app._brief_chat_text(full, max_chars=len(first) + 8, max_lines=20, grace_chars=len(second) + 5)
 
-    assert (first + second).strip() in brief
-    assert not brief.endswith("finish.…")
-    assert "[truncated in chat" in brief
+    assert brief == full
+    assert "[truncated in chat" not in brief
 
 
 def test_tui_copy_buffers_use_pbcopy(monkeypatch):
