@@ -33,7 +33,7 @@ def test_tui_controls_are_limited_to_stop_provider_operator_trace_quit(monkeypat
                 "tab-diff": "Diff",
                 "btn-stop": "Stop",
                 "btn-provider": "Provider: openai",
-                "btn-operator": "Operator",
+                "btn-clear": "Clear",
                 "btn-trace": "Trace: compact",
                 "btn-quit": "Quit",
             }
@@ -166,6 +166,41 @@ def test_tui_input_enter_submits_instead_of_inserting_newline(monkeypatch):
             await pilot.pause()
             assert composer.text == ""
             assert app.trace_verbosity_levels[app.trace_verbosity_index] == "normal"
+
+    asyncio.run(_run())
+
+
+def test_tui_clear_button_clears_input(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            composer = app.query_one("#input", TextArea)
+            composer.load_text("draft prompt")
+            app.action_clear_input()
+            assert composer.text == ""
+
+    asyncio.run(_run())
+
+
+def test_tui_up_cycles_previous_sent_messages(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)) as pilot:
+            composer = app.query_one("#input", titan_tui_module.ComposerTextArea)
+            composer.record_history("first prompt")
+            composer.record_history("second prompt")
+            composer.focus()
+
+            await pilot.press("up")
+            assert composer.text == "second prompt"
+            await pilot.press("up")
+            assert composer.text == "first prompt"
+            await pilot.press("up")
+            assert composer.text == "second prompt"
 
     asyncio.run(_run())
 

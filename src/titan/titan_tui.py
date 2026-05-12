@@ -82,6 +82,8 @@ class ComposerTextArea(TextArea):
         super().__init__(*args, **kwargs)
         self.paste_payloads: dict[str, str] = {}
         self._paste_index = 0
+        self.message_history: list[str] = []
+        self._history_index: int | None = None
 
     def _path_from_token(self, token: str) -> str | None:
         raw = token.strip().strip('"').strip("'")
@@ -138,6 +140,31 @@ class ComposerTextArea(TextArea):
             expanded = expanded.replace(token, payload)
         return expanded
 
+    def record_history(self, text: str) -> None:
+        stripped = text.strip()
+        if not stripped:
+            return
+        if not self.message_history or self.message_history[-1] != stripped:
+            self.message_history.append(stripped)
+        self._history_index = None
+
+    def recall_previous_history(self) -> bool:
+        if not self.message_history:
+            return False
+        if self._history_index is None:
+            self._history_index = len(self.message_history) - 1
+        else:
+            self._history_index = (self._history_index - 1) % len(self.message_history)
+        self.load_text(self.message_history[self._history_index])
+        return True
+
+    def recall_next_history(self) -> bool:
+        if not self.message_history or self._history_index is None:
+            return False
+        self._history_index = (self._history_index + 1) % len(self.message_history)
+        self.load_text(self.message_history[self._history_index])
+        return True
+
     async def _on_paste(self, event: events.Paste) -> None:
         event.stop()
         event.prevent_default()
@@ -149,6 +176,16 @@ class ComposerTextArea(TextArea):
             event.prevent_default()
             self.post_message(self.Submitted(self.expand_paste_tokens(self.text)))
             return
+        if event.key == "up":
+            if self.recall_previous_history():
+                event.stop()
+                event.prevent_default()
+                return
+        if event.key == "down":
+            if self.recall_next_history():
+                event.stop()
+                event.prevent_default()
+                return
         await super()._on_key(event)
 
 
@@ -272,7 +309,7 @@ class TitanTui(App[None]):
         with Horizontal(id="controls"):
             yield Button("Stop", id="btn-stop")
             yield Button(f"Provider: {self.cfg.provider}", id="btn-provider")
-            yield Button("Operator", id="btn-operator")
+            yield Button("Clear", id="btn-clear")
             yield Button(f"Trace: {self._chat_trace_mode()}", id="btn-trace")
             yield Button("Quit", id="btn-quit", variant="error")
         yield Static("Titan: ready", id="assistant_line")
@@ -312,7 +349,7 @@ class TitanTui(App[None]):
         self.compact_ui = compact
 
         self.query_one("#btn-stop", Button).label = "Stop"
-        self.query_one("#btn-operator", Button).label = "Operator"
+        self.query_one("#btn-clear", Button).label = "Clear"
         self.query_one("#btn-trace", Button).label = f"Trace: {self._chat_trace_mode()}"
         self.query_one("#btn-quit", Button).label = "Quit"
 
@@ -527,6 +564,8 @@ class TitanTui(App[None]):
     async def on_composer_text_area_submitted(self, event: ComposerTextArea.Submitted) -> None:
         composer = self.query_one("#input", ComposerTextArea)
         task = event.value.strip()
+        if task and not self.ui.pending:
+            composer.record_history(task)
         composer.load_text("")
         composer.paste_payloads.clear()
         await self._submit_task(task)
@@ -759,6 +798,13 @@ class TitanTui(App[None]):
         self._write_trace("operator input: type in bottom box and press Enter")
         self.query_one("#input", ComposerTextArea).focus()
 
+    def action_clear_input(self) -> None:
+        composer = self.query_one("#input", ComposerTextArea)
+        composer.load_text("")
+        composer.paste_payloads.clear()
+        composer.focus()
+        self._write_trace("input cleared")
+
     def action_toggle_trace_verbosity(self) -> None:
         self.trace_verbosity_index = (self.trace_verbosity_index + 1) % len(self.trace_verbosity_levels)
         mode = self.trace_verbosity_levels[self.trace_verbosity_index]
@@ -849,8 +895,8 @@ class TitanTui(App[None]):
             self._set_top_tab("trace")
         elif bid == "tab-diff":
             self._set_top_tab("diff")
-        elif bid == "btn-operator":
-            self.action_operator_input()
+        elif bid == "btn-clear":
+            self.action_clear_input()
         elif bid == "btn-trace":
             self.action_toggle_trace_verbosity()
         elif bid == "btn-provider":
