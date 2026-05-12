@@ -35,6 +35,34 @@ def test_responses_payload_converts_local_image_path_to_input_image(tmp_path: Pa
     assert content[1]["image_url"].startswith("data:image/jpeg;base64,")
 
 
+def test_responses_payload_converts_unquoted_screenshot_path_with_spaces(tmp_path: Path):
+    image = tmp_path / "Screenshot 2026-05-12 at 5.47.12 AM.png"
+    image.write_bytes(b"fake-png")
+    provider = OpenAICompatProvider(api_base="https://example.test/v1", api_key="token")
+
+    content = provider._responses_message_content(
+        Message(role=Role.USER, content=f"examine the prompt in {image} and execute"),
+    )
+
+    assert isinstance(content, list)
+    assert content[1]["type"] == "input_image"
+    assert content[1]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_chat_payload_converts_backticked_screenshot_path_with_spaces(tmp_path: Path):
+    image = tmp_path / "Screenshot 2026-05-12 at 5.47.12 AM.png"
+    image.write_bytes(b"fake-png")
+    provider = OpenAICompatProvider(api_base="https://example.test/v1", api_key="token")
+
+    payload = provider._chat_messages_payload([
+        Message(role=Role.USER, content=f"You shared `{image}`. Describe it."),
+    ])
+
+    content = payload[0]["content"]
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
 def test_non_image_text_stays_plain_for_chat_payload():
     provider = OpenAICompatProvider(api_base="https://example.test/v1", api_key="token")
 
