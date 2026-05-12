@@ -113,6 +113,52 @@ def test_titan_harness_instructs_image_tasks_to_use_attached_pixels_not_browser(
     assert [payload["count"] for event_type, payload in events if event_type == "image_attachments_detected"] == [1]
 
 
+def test_titan_harness_detects_wrapped_image_path_and_blocks_browser_tool(tmp_path: Path):
+    image = tmp_path / "Screenshot 2026-05-12 at 6.29.31\u202fAM.png"
+    image.write_bytes(b"fake-png")
+    provider = CapturingProvider(AssistantResponse(text="I can inspect it."))
+    harness = TitanHarness(
+        provider=provider,
+        tools=default_registry(),
+        config=HarnessConfig(permission_mode="allow"),
+        session_store=SessionStore(str(tmp_path / "session.jsonl")),
+    )
+
+    wrapped = str(image).replace("/", "/\n", 1)
+    out = harness.run_with_callback(
+        f"execute from image path {wrapped}",
+        [Message(role=Role.SYSTEM, content="You are Titan.")],
+    )
+
+    assert out.stop.reason == RunStopReason.AssistantFinal
+    system_prompt = provider.calls[0][0].content
+    assert "Local image attachment guidance" in system_prompt
+    tool_names = [tool.get("function", {}).get("name") for tool in provider.tool_defs[0]]
+    assert "browser_navigate" not in tool_names
+
+
+def test_titan_harness_blocks_browser_for_missing_local_image_reference(tmp_path: Path):
+    missing = tmp_path / "Screenshot 2026-05-12 at 5.47.12AM.png"
+    provider = CapturingProvider(AssistantResponse(text="Path not found; provide corrected path."))
+    harness = TitanHarness(
+        provider=provider,
+        tools=default_registry(),
+        config=HarnessConfig(permission_mode="allow"),
+        session_store=SessionStore(str(tmp_path / "session.jsonl")),
+    )
+
+    out = harness.run_with_callback(
+        f"'{missing}' execute the prompt in the image",
+        [Message(role=Role.SYSTEM, content="You are Titan.")],
+    )
+
+    assert out.stop.reason == RunStopReason.AssistantFinal
+    system_prompt = provider.calls[0][0].content
+    assert "missing/unreadable" in system_prompt
+    tool_names = [tool.get("function", {}).get("name") for tool in provider.tool_defs[0]]
+    assert "browser_navigate" not in tool_names
+
+
 def test_titan_harness_routes_delegation_requests_to_delegate_mode(tmp_path: Path):
     provider = CapturingProvider(AssistantResponse(text="I will split this into workers."))
     harness = TitanHarness(

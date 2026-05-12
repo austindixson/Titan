@@ -10,6 +10,7 @@ from .provider import Provider, ProviderError, retry_call
 from .session import SessionStore
 from .tools import ToolRegistry
 from .types import Message, Role, RunOutcome, RunStopContract, RunStopReason
+from .image_paths import local_image_references_from_text
 
 
 EMPTY_TURN_RECOVERY_TEMPLATE = (
@@ -208,8 +209,22 @@ class AgentLoop:
                 )
 
             try:
+                tool_defs = self.tools.definitions()
+                local_image_refs: list[str] = []
+                for m in history:
+                    if m.role != Role.USER:
+                        continue
+                    local_image_refs.extend(local_image_references_from_text(m.content))
+                if local_image_refs:
+                    tool_defs = [
+                        td
+                        for td in tool_defs
+                        if (td.get("function", {}) or {}).get("name") != "browser_navigate"
+                    ]
+                    emit("image_attachments_detected", count=len(local_image_refs), references=local_image_refs)
+
                 emit("provider_request", iteration=iterations)
-                resp = retry_call(lambda: self.provider.generate(self.config.model, history, self.tools.definitions()), self.config.retry)
+                resp = retry_call(lambda: self.provider.generate(self.config.model, history, tool_defs), self.config.retry)
             except ProviderError as e:
                 reason = RunStopReason.ErrorRetryExhausted if e.retryable else RunStopReason.ErrorNonRetryable
                 msg = f"Provider error: {str(e)}"

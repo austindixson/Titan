@@ -1,7 +1,6 @@
 from __future__ import annotations
 import base64
 import json
-import mimetypes
 import random
 import time
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from typing import Any
 from .auth import resolve_provider_credentials
 from .config import RetryConfig, HarnessConfig
 from .image_paths import candidate_image_paths_from_text
+from .image_preprocess import preprocess_image_for_attachment
 
 
 class ProviderError(Exception):
@@ -145,8 +145,8 @@ class OpenAICompatProvider(Provider):
         return candidate_image_paths_from_text(text)
 
     def _image_data_url(self, path: Path) -> str:
-        mime = mimetypes.guess_type(str(path))[0] or "image/png"
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        mime, image_bytes = preprocess_image_for_attachment(path)
+        encoded = base64.b64encode(image_bytes).decode("ascii")
         return f"data:{mime};base64,{encoded}"
 
     def _chat_content_for_message(self, message: Message) -> str | list[dict[str, Any]]:
@@ -161,7 +161,14 @@ class OpenAICompatProvider(Provider):
         return content
 
     def _chat_messages_payload(self, messages: list[Message]) -> list[dict[str, Any]]:
-        return [{"role": m.role.value, "content": self._chat_content_for_message(m)} for m in messages]
+        payload: list[dict[str, Any]] = []
+        for m in messages:
+            payload.append({"role": m.role.value, "content": self._chat_content_for_message(m)})
+            tool_image = self._tool_image_path_from_descriptor(m)
+            if tool_image is not None:
+                bridge = self._tool_image_bridge_user_message(tool_image)
+                payload.append({"role": bridge.role.value, "content": self._chat_content_for_message(bridge)})
+        return payload
 
     def _responses_message_content(self, message: Message) -> str | list[dict[str, Any]]:
         if message.role != Role.USER:
@@ -173,6 +180,37 @@ class OpenAICompatProvider(Provider):
         for image in images:
             content.append({"type": "input_image", "image_url": self._image_data_url(image)})
         return content
+
+    def _tool_image_path_from_descriptor(self, message: Message) -> Path | None:
+        if message.role != Role.TOOL:
+            return None
+        if (message.tool_name or "") != "read_file":
+            return None
+        raw = (message.content or "").strip()
+        if not raw.startswith("{"):
+            return None
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return None
+        if not isinstance(payload, dict) or payload.get("type") != "image_file":
+            return None
+        raw_path = str(payload.get("path", "")).strip()
+        if not raw_path:
+            return None
+        candidate = Path(raw_path).expanduser()
+        if not candidate.exists() or not candidate.is_file():
+            return None
+        return candidate.resolve()
+
+    def _tool_image_bridge_user_message(self, image_path: Path) -> Message:
+        return Message(
+            role=Role.USER,
+            content=(
+                f"[tool-image] Local image read via read_file: {image_path}\n"
+                "Analyze this attached image for the current task."
+            ),
+        )
 
     def _generate_chat_completions(self, base: str, token: str, model: str, messages: list[Message], tools: list[dict], on_event=None) -> AssistantResponse:
         url = f"{base.rstrip('/')}/chat/completions"
@@ -321,6 +359,10 @@ class OpenAICompatProvider(Provider):
                     "call_id": call_id,
                     "output": m.content,
                 })
+                tool_image = self._tool_image_path_from_descriptor(m)
+                if tool_image is not None:
+                    bridge = self._tool_image_bridge_user_message(tool_image)
+                    input_items.append({"role": "user", "content": self._responses_message_content(bridge)})
 
         payload = {
             "model": model,

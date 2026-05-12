@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import mimetypes
 import subprocess
 import os
 import re
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 from .types import ToolResult
+from .path_resolver import resolve_existing_read_path
 
 
 class ToolRegistry:
@@ -171,13 +173,42 @@ class ToolRegistry:
             return ToolResult(call_id=call_id, tool_name=name, content=str(e), is_error=True)
 
 
-def read_file_tool(args: dict) -> str:
-    path = Path(args["path"]).expanduser()
-    offset = int(args.get("offset", 1))
-    limit = int(args.get("limit", 500))
-    lines = path.read_text().splitlines()
-    chunk = lines[offset - 1 : offset - 1 + limit]
-    return "\n".join(f"{i+offset}|{line}" for i, line in enumerate(chunk))
+def make_read_file_tool(reg: ToolRegistry):
+    def _read_file(args: dict) -> str:
+        raw_path = str(args["path"])
+        offset = max(1, int(args.get("offset", 1)))
+        limit = max(1, min(2000, int(args.get("limit", 500))))
+
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = (reg.cwd / candidate).resolve()
+
+        resolved = resolve_existing_read_path(str(candidate)) or candidate
+
+        guessed_mime, _ = mimetypes.guess_type(str(resolved))
+        if guessed_mime and guessed_mime.startswith("image/"):
+            try:
+                size_bytes = resolved.stat().st_size
+            except OSError:
+                size_bytes = 0
+            return json.dumps(
+                {
+                    "type": "image_file",
+                    "path": str(resolved),
+                    "mime": guessed_mime,
+                    "size_bytes": size_bytes,
+                    "note": "Binary image detected; use this local path as an image attachment/input for vision analysis.",
+                }
+            )
+
+        try:
+            lines = resolved.read_text().splitlines()
+        except UnicodeDecodeError:
+            raise RuntimeError(f"binary or non-text file: {resolved}")
+        chunk = lines[offset - 1 : offset - 1 + limit]
+        return "\n".join(f"{i+offset}|{line}" for i, line in enumerate(chunk))
+
+    return _read_file
 
 
 def write_file_tool(args: dict) -> str:
@@ -630,7 +661,7 @@ def make_cronjob_tool(reg: ToolRegistry):
 
 def default_registry() -> ToolRegistry:
     reg = ToolRegistry()
-    reg.register("read_file", read_file_tool)
+    reg.register("read_file", make_read_file_tool(reg))
     reg.register("write_file", write_file_tool)
     reg.register("shell", make_shell_tool(reg))
     reg.register("cd", make_cd_tool(reg))

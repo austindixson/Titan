@@ -1,3 +1,4 @@
+import json
 from urllib import error
 
 from titan.provider import OpenAICompatProvider, ProviderError
@@ -149,3 +150,81 @@ def test_codex_function_arguments_delta_accumulates(monkeypatch):
     assert len(out.tool_calls) == 1
     assert out.tool_calls[0].name == "read_file"
     assert out.tool_calls[0].arguments == {"path": "a.txt"}
+
+
+def test_codex_payload_bridges_read_file_image_descriptor_to_input_image(monkeypatch, tmp_path):
+    provider = OpenAICompatProvider(api_base="https://chatgpt.com/backend-api/codex", api_key="token")
+    image = tmp_path / "bridge.png"
+    image.write_bytes(b"fake-png")
+
+    captured = {"body": None}
+
+    def _capture(req, *args, **kwargs):
+        raw = kwargs.get("data") or req.data or b"{}"
+        captured["body"] = json.loads(raw.decode())
+        return _StreamingResponse(['data: [DONE]\\n'])
+
+    monkeypatch.setattr("titan.provider.request.urlopen", _capture)
+
+    descriptor = json.dumps(
+        {
+            "type": "image_file",
+            "path": str(image.resolve()),
+            "mime": "image/png",
+            "size_bytes": image.stat().st_size,
+        }
+    )
+    messages = [
+        Message(role=Role.USER, content="analyze image"),
+        Message(role=Role.TOOL, tool_name="read_file", tool_call_id="call_1", content=descriptor),
+    ]
+
+    provider.generate("gpt", messages, [])
+
+    payload = captured["body"]
+    assert isinstance(payload, dict)
+    input_items = payload.get("input") or []
+    bridged_items = [item for item in input_items if item.get("role") == "user" and isinstance(item.get("content"), list)]
+    assert bridged_items
+    last_content = bridged_items[-1]["content"]
+    assert last_content[1]["type"] == "input_image"
+    assert last_content[1]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_chat_completions_payload_bridges_read_file_image_descriptor_to_image_url(monkeypatch, tmp_path):
+    provider = OpenAICompatProvider(api_base="https://api.openai.com/v1", api_key="token")
+    image = tmp_path / "bridge-chat.png"
+    image.write_bytes(b"fake-png")
+
+    captured = {"body": None}
+
+    def _capture(req, *args, **kwargs):
+        raw = kwargs.get("data") or req.data or b"{}"
+        captured["body"] = json.loads(raw.decode())
+        return _FakeResponse({"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+
+    monkeypatch.setattr("titan.provider.request.urlopen", _capture)
+
+    descriptor = json.dumps(
+        {
+            "type": "image_file",
+            "path": str(image.resolve()),
+            "mime": "image/png",
+            "size_bytes": image.stat().st_size,
+        }
+    )
+    messages = [
+        Message(role=Role.USER, content="analyze image"),
+        Message(role=Role.TOOL, tool_name="read_file", tool_call_id="call_1", content=descriptor),
+    ]
+
+    provider.generate("gpt", messages, [])
+
+    payload = captured["body"]
+    assert isinstance(payload, dict)
+    msg_items = payload.get("messages") or []
+    bridged_items = [item for item in msg_items if item.get("role") == "user" and isinstance(item.get("content"), list)]
+    assert bridged_items
+    last_content = bridged_items[-1]["content"]
+    assert last_content[1]["type"] == "image_url"
+    assert last_content[1]["image_url"]["url"].startswith("data:image/png;base64,")

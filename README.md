@@ -1,4 +1,4 @@
-# Titan
+# AI Chat
 
 Resilient local-first TUI agent harness with checkpointing and replay.
 
@@ -27,4 +27,3 @@ cd docs/remotion
 npm install
 npm run render:all
 ```
-

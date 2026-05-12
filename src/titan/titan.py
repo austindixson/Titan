@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .config import HarnessConfig
-from .image_paths import candidate_image_paths_from_text
+from .image_paths import candidate_image_paths_from_text, local_image_references_from_text
 from .loop import AgentEvent
 from .permissions import PermissionError, PermissionPolicy
 from .provider import Provider, ProviderError, retry_call
@@ -180,14 +180,21 @@ def _format_iteration_budget_plan(plan: dict[str, Any]) -> str:
     )
 
 
-def _format_image_attachment_guidance(paths: list[Path]) -> str:
-    if not paths:
+def _format_image_attachment_guidance(paths: list[Path], refs: list[str]) -> str:
+    if not refs:
         return ""
-    path_lines = "\n".join(f"- {path}" for path in paths)
+    path_lines = "\n".join(f"- {path}" for path in refs)
+    attachment_note = ""
+    if not paths:
+        attachment_note = (
+            "Note: one or more referenced local image paths may be missing/unreadable right now; "
+            "do not use browser_navigate for them. Ask for a corrected local path if needed.\n"
+        )
     return (
         "Local image attachment guidance:\n"
         "The user supplied local image path(s), and the provider request includes them as image attachments when supported.\n"
         f"{path_lines}\n"
+        f"{attachment_note}"
         "For image/screenshot tasks, analyze the attached image pixels directly. "
         "Do not call browser_navigate or web tools for these local file paths. "
         "Do not say you cannot read the local path and do not ask the user to upload it again unless the provider returns an explicit image/vision error."
@@ -257,7 +264,8 @@ class TitanHarness:
         plan_budget = _iteration_budget_plan(self.config, route_decision)
         plan_budget_text = _format_iteration_budget_plan(plan_budget)
         image_paths = candidate_image_paths_from_text(task)
-        image_guidance_text = _format_image_attachment_guidance(image_paths)
+        image_refs = local_image_references_from_text(task)
+        image_guidance_text = _format_image_attachment_guidance(image_paths, image_refs)
         session = TitanSession(goal=task, trace_id=trace_id, current_state=route_decision.state)
         self.session_store.checkpoint(session.current_state.value, 0, f"run_start:{route_decision.reason}")
         self._append(history, Message(role=Role.USER, content=task))
@@ -272,7 +280,7 @@ class TitanHarness:
 
         emit("route_decision", state=route_decision.state.value, reason=route_decision.reason, instruction=route_decision.instruction)
         emit("plan_budget", **plan_budget)
-        if image_paths:
+        if image_refs:
             emit("image_attachments_detected", count=len(image_paths), paths=[str(path) for path in image_paths])
 
         while session.turn < self.config.max_iterations:
@@ -297,7 +305,7 @@ class TitanHarness:
             context = self.memory.get_relevant_context(session.goal, session.context_budget)
             session.trace.append({"turn": session.turn, "state": session.current_state.value, "context_len": len(context)})
             tools = self.tools.definitions()
-            if image_paths:
+            if image_refs:
                 tools = [tool for tool in tools if tool.get("function", {}).get("name") != "browser_navigate"]
             emit(
                 "provider_request",
