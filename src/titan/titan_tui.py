@@ -680,6 +680,14 @@ class TitanTui(App[None]):
             self.ui.state = state
             self._record_progress_event(f"routed to {state}: {reason}")
             self._trace_emit(trace, f"route {state}: {reason}", ev.payload)
+        elif ev.type == "plan_budget":
+            phases = ev.payload.get("phases", [])
+            phase_summary = ", ".join(
+                f"{p.get('name')}:{p.get('iterations')}" for p in phases if isinstance(p, dict)
+            )
+            max_iterations = ev.payload.get("max_iterations")
+            self._record_progress_event(f"planned iteration budget {phase_summary} within {max_iterations} turns")
+            self._trace_emit(trace, f"plan-budget max={max_iterations} phases={phase_summary}", ev.payload)
         elif ev.type == "iteration_started":
             self.ui.turn = int(ev.payload.get("iteration", self.ui.turn))
             self.ui.turn_tool_calls = 0
@@ -704,6 +712,12 @@ class TitanTui(App[None]):
         elif ev.type == "provider_stream_tool_call":
             name = str(ev.payload.get("name", "")) or "tool"
             self._trace_emit(trace, f"stream tool-call {name}", ev.payload)
+        elif ev.type == "budget_finalization_requested":
+            remaining = ev.payload.get("remaining_iterations")
+            self.ui.state = "FINALIZE"
+            self._record_progress_event(f"using reserved finalization turn ({remaining} remaining) instead of taking more tool actions")
+            self._trace_emit(trace, f"budget-finalize remaining={remaining}", ev.payload)
+            self._maybe_emit_progress_update(force=True)
         elif ev.type == "empty_turn_recovery":
             self._record_progress_event("recovering from an empty assistant turn after tool use")
             self._trace_emit(
@@ -840,11 +854,25 @@ class TitanTui(App[None]):
             "- I can do that next if you say: do it."
         )
 
+    def _budget_iteration_fallback_text(self, out: RunOutcome) -> str:
+        return (
+            "Summary:\n"
+            "- Paused cleanly at the configured iteration ceiling before Titan produced a final answer.\n"
+            f"- Progress used {out.stop.iterations} turns and {out.stop.tool_calls_total} tool calls.\n\n"
+            "Next best step:\n"
+            "- Continue the same task with the current context, or raise max_iterations for larger work."
+        )
+
     def on_loop_done_msg(self, msg: LoopDoneMsg) -> None:
         outlog = self.query_one("#output", RichLog)
         out = msg.outcome
 
-        final_text = out.text.strip() if out.text.strip() else f"Stopped: {out.stop.reason.value} ({out.stop.notes or 'no details'})"
+        if out.text.strip():
+            final_text = out.text.strip()
+        elif out.stop.reason == RunStopReason.BudgetIterations:
+            final_text = self._budget_iteration_fallback_text(out)
+        else:
+            final_text = f"Stopped: {out.stop.reason.value} ({out.stop.notes or 'no details'})"
         final_text = self._with_final_summary(final_text, out)
         self._record_progress_event(
             f"run stopped at {out.stop.reason.value} after {out.stop.iterations} turns and {out.stop.tool_calls_total} tools"

@@ -102,6 +102,65 @@ def test_titan_harness_routes_delegation_requests_to_delegate_mode(tmp_path: Pat
     assert "use delegate_task" in provider.calls[0][0].content
 
 
+def test_titan_harness_injects_iteration_budgeted_phase_plan_for_work_tasks(tmp_path: Path):
+    provider = CapturingProvider(AssistantResponse(text="Plan:\n1. Inspect.\n2. Fix.\n3. Verify."))
+    harness = TitanHarness(
+        provider=provider,
+        tools=default_registry(),
+        config=HarnessConfig(permission_mode="allow", max_iterations=20),
+        session_store=SessionStore(str(tmp_path / "session.jsonl")),
+    )
+    events = []
+
+    out = harness.run_with_callback(
+        "review and improve planning/decompose behavior",
+        [Message(role=Role.SYSTEM, content="You are Titan.")],
+        on_event=lambda e: events.append((e.type, e.payload)),
+    )
+
+    assert out.stop.reason == RunStopReason.AssistantFinal
+    budget_events = [payload for event_type, payload in events if event_type == "plan_budget"]
+    assert budget_events
+    assert budget_events[0]["max_iterations"] == 20
+    assert budget_events[0]["reserved_finalization_iterations"] == 1
+    assert sum(phase["iterations"] for phase in budget_events[0]["phases"]) <= 20
+    system_prompt = provider.calls[0][0].content
+    assert "Iteration budget plan" in system_prompt
+    assert "Stay within the user's configured max_iterations=20" in system_prompt
+    assert "Phase 1" in system_prompt
+
+
+def test_titan_harness_uses_last_iteration_to_finalize_instead_of_raw_iteration_error(tmp_path: Path):
+    script = [
+        AssistantResponse(text="Inspecting", tool_calls=[ToolCall(id="c1", name="shell", arguments={"command": "echo inspect"})]),
+        AssistantResponse(text="Fixing", tool_calls=[ToolCall(id="c2", name="shell", arguments={"command": "echo fix"})]),
+        AssistantResponse(text="Summary:\n- Partial work completed.\n\nNext best step:\n- Continue verification."),
+    ]
+    provider = MockProvider(script=script)
+    harness = TitanHarness(
+        provider=provider,
+        tools=default_registry(),
+        config=HarnessConfig(permission_mode="allow", max_iterations=3),
+        session_store=SessionStore(str(tmp_path / "session.jsonl")),
+    )
+    events = []
+
+    out = harness.run_with_callback(
+        "fix a medium coding task",
+        [Message(role=Role.SYSTEM, content="s")],
+        on_event=lambda e: events.append((e.type, e.payload)),
+    )
+
+    assert out.stop.reason == RunStopReason.AssistantFinal
+    assert out.stop.iterations == 3
+    assert "iteration budget" not in out.text.lower()
+    assert [payload["remaining_iterations"] for event_type, payload in events if event_type == "budget_finalization_requested"] == [1]
+    budget_events = [payload for event_type, payload in events if event_type == "plan_budget"]
+    assert sum(phase["iterations"] for phase in budget_events[0]["phases"]) <= 3
+    final_request = provider.idx
+    assert final_request == 3
+
+
 def test_titan_harness_emits_plan_text_before_tool_execution(tmp_path: Path):
     script = [
         AssistantResponse(

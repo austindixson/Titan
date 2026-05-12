@@ -135,6 +135,50 @@ class RouteDecision:
     instruction: str
 
 
+def _allocate_phase_iterations(max_iterations: int, phases: list[str]) -> list[dict[str, Any]]:
+    usable = max(0, max_iterations - 1)
+    count = max(1, len(phases))
+    base = usable // count
+    remaining = usable - (base * count)
+    allocations: list[dict[str, Any]] = []
+    for index, phase in enumerate(phases, start=1):
+        iterations = base + (1 if remaining > 0 else 0)
+        remaining = max(0, remaining - 1)
+        allocations.append({"phase": index, "name": phase, "iterations": iterations})
+    return allocations
+
+
+def _phase_names_for_route(decision: RouteDecision) -> list[str]:
+    if decision.state == OrchestratorState.DELEGATE:
+        return ["scope", "delegate", "integrate", "verify", "finalize"]
+    if decision.state == OrchestratorState.PLAN:
+        return ["scope", "inspect", "implement", "verify", "finalize"]
+    return ["answer"]
+
+
+def _iteration_budget_plan(config: HarnessConfig, decision: RouteDecision) -> dict[str, Any]:
+    phases = _phase_names_for_route(decision)
+    allocations = _allocate_phase_iterations(config.max_iterations, phases)
+    return {
+        "max_iterations": config.max_iterations,
+        "reserved_finalization_iterations": 1,
+        "phases": allocations,
+    }
+
+
+def _format_iteration_budget_plan(plan: dict[str, Any]) -> str:
+    phase_lines = []
+    for phase in plan["phases"]:
+        phase_lines.append(f"Phase {phase['phase']}: {phase['name']} — target {phase['iterations']} iteration(s)")
+    return (
+        "Iteration budget plan:\n"
+        f"Stay within the user's configured max_iterations={plan['max_iterations']}.\n"
+        f"Reserve {plan['reserved_finalization_iterations']} final iteration(s) for summary/next step instead of running into the limit.\n"
+        + "\n".join(phase_lines)
+        + "\nIf remaining iterations are low, stop taking new tool actions and produce a concise Summary + Next best step."
+    )
+
+
 class IntentRouter:
     DIRECT_KEYWORDS = {
         "hi", "hello", "hey", "yo", "thanks", "thank you", "ok", "okay", "yes", "no",
@@ -195,11 +239,14 @@ class TitanHarness:
     def run_with_callback(self, task: str, history: list[Message], on_event: Optional[Callable[[AgentEvent], None]] = None) -> RunOutcome:
         trace_id = self.session_store.trace_id
         route_decision = self.router.decide(task)
+        plan_budget = _iteration_budget_plan(self.config, route_decision)
+        plan_budget_text = _format_iteration_budget_plan(plan_budget)
         session = TitanSession(goal=task, trace_id=trace_id, current_state=route_decision.state)
         self.session_store.checkpoint(session.current_state.value, 0, f"run_start:{route_decision.reason}")
         self._append(history, Message(role=Role.USER, content=task))
         started = time.time()
         tool_calls_total = 0
+        budget_finalization_requested = False
 
         def emit(t: str, **payload: Any) -> None:
             self.event_bus.emit(t, payload)
@@ -207,11 +254,27 @@ class TitanHarness:
                 on_event(AgentEvent(type=t, payload=payload))
 
         emit("route_decision", state=route_decision.state.value, reason=route_decision.reason, instruction=route_decision.instruction)
+        emit("plan_budget", **plan_budget)
 
         while session.turn < self.config.max_iterations:
             session.turn += 1
             tool_calls_this_turn = 0
             emit("on_state_enter", state=session.current_state.value, turn=session.turn)
+            remaining_iterations = self.config.max_iterations - session.turn + 1
+            if tool_calls_total > 0 and remaining_iterations <= 1 and not budget_finalization_requested:
+                budget_finalization_requested = True
+                session.current_state = OrchestratorState.FINALIZE
+                finalization_prompt = (
+                    "Titan is on the reserved finalization iteration. Do not call tools. "
+                    "Return a concise Summary and Next best step using the work already completed."
+                )
+                self._append(history, Message(role=Role.SYSTEM, content=finalization_prompt))
+                emit(
+                    "budget_finalization_requested",
+                    remaining_iterations=remaining_iterations,
+                    max_iterations=self.config.max_iterations,
+                    tool_calls_total=tool_calls_total,
+                )
             context = self.memory.get_relevant_context(session.goal, session.context_budget)
             session.trace.append({"turn": session.turn, "state": session.current_state.value, "context_len": len(context)})
             tools = self.tools.definitions()
@@ -229,7 +292,7 @@ class TitanHarness:
                 resp = retry_call(
                     lambda: self.provider.generate_with_callback(
                         self.config.model,
-                        self._provider_history(history, route_decision),
+                        self._provider_history(history, route_decision, plan_budget_text),
                         tools,
                         on_event=lambda event_type, **event_payload: emit(f"provider_{event_type}", **event_payload),
                     ),
@@ -279,6 +342,28 @@ class TitanHarness:
 
             results: list[ToolResult] = []
             if resp.tool_calls:
+                if budget_finalization_requested:
+                    elapsed_ms = int((time.time() - started) * 1000)
+                    text = resp.text.strip() or (
+                        "Summary:\n"
+                        "- Stopped cleanly on the reserved finalization pass before taking more tool actions.\n\n"
+                        "Next best step:\n"
+                        "- Continue the task with a fresh iteration budget."
+                    )
+                    emit("tool_batch_rejected", count=len(resp.tool_calls), reason="reserved_finalization_iteration")
+                    emit("on_transition", from_state=session.current_state.value, to_state=OrchestratorState.FINALIZE.value, turn=session.turn)
+                    emit("on_state_exit", state=session.current_state.value, turn=session.turn)
+                    self.session_store.checkpoint(OrchestratorState.FINALIZE.value, session.turn, "reserved_finalization")
+                    return RunOutcome(
+                        text=text,
+                        stop=RunStopContract(
+                            reason=RunStopReason.AssistantFinal,
+                            iterations=session.turn,
+                            tool_calls_total=tool_calls_total,
+                            elapsed_ms=elapsed_ms,
+                            notes=f"trace_id={trace_id}; reserved_finalization_iteration",
+                        ),
+                    )
                 if len(resp.tool_calls) > self.config.max_tool_calls_per_iteration:
                     emit(
                         "tool_batch_rejected",
@@ -388,13 +473,15 @@ class TitanHarness:
             ),
         )
 
-    def _provider_history(self, history: list[Message], decision: RouteDecision) -> list[Message]:
+    def _provider_history(self, history: list[Message], decision: RouteDecision, plan_budget_text: str = "") -> list[Message]:
         route_text = (
             "Titan routing decision:\n"
             f"- mode: {decision.state.value}\n"
             f"- reason: {decision.reason}\n"
             f"- instruction: {decision.instruction}"
         )
+        if plan_budget_text:
+            route_text = f"{route_text}\n\n{plan_budget_text}"
         if history and history[0].role == Role.SYSTEM:
             return [Message(role=Role.SYSTEM, content=f"{history[0].content}\n\n{route_text}"), *history[1:]]
         return [Message(role=Role.SYSTEM, content=route_text), *history]

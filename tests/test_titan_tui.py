@@ -425,7 +425,8 @@ def test_tui_progress_updates_chat_before_budget_stop_final(monkeypatch):
             progress_lines = [line for line in app.chat_lines if line.startswith("progress>")]
             assert progress_lines
             assert "run stopped at BudgetIterations" in progress_lines[-1]
-            assert app.chat_lines[-1] == "Titan: Stopped: BudgetIterations (max_iterations)"
+            assert app.chat_lines[-1].startswith("Titan: Summary:\n- Paused cleanly at the configured iteration ceiling")
+            assert "Stopped: BudgetIterations" not in app.chat_lines[-1]
 
     asyncio.run(_run())
 
