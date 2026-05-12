@@ -81,6 +81,39 @@ def test_tui_top_panel_tabs_switch_trace_and_diff(monkeypatch):
     asyncio.run(_run())
 
 
+def test_tui_trace_tab_click_expands_over_chat_and_click_again_minimizes(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)) as pilot:
+            top = app.query_one("#top")
+            output = app.query_one("#output", titan_tui_module.SelectableRichLog)
+            trace = app.query_one("#trace", titan_tui_module.SelectableRichLog)
+
+            assert app.active_top_tab == "trace"
+            assert app.trace_expanded is False
+            assert top.has_class("expanded") is False
+            assert output.display is True
+            assert trace.display is True
+
+            await pilot.click("#tab-trace")
+            await pilot.pause()
+            assert app.trace_expanded is True
+            assert top.has_class("expanded") is True
+            assert output.display is False
+            assert str(app.query_one("#tab-trace", Button).label) == "Trace ▾"
+
+            await pilot.click("#tab-trace")
+            await pilot.pause()
+            assert app.trace_expanded is False
+            assert top.has_class("expanded") is False
+            assert output.display is True
+            assert str(app.query_one("#tab-trace", Button).label) == "Trace ●"
+
+    asyncio.run(_run())
+
+
 def test_tui_diff_lines_are_color_coded(monkeypatch):
     _patch_tui_deps(monkeypatch)
     app = TitanTui()

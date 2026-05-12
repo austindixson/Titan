@@ -207,6 +207,10 @@ class TitanTui(App[None]):
         height: 6;
         min-height: 6;
     }
+    #top.expanded {
+        height: 1fr;
+        min-height: 10;
+    }
     #top_tabs {
         height: 1;
         padding: 0 1;
@@ -295,6 +299,7 @@ class TitanTui(App[None]):
         self.diff_lines: list[str] = []
         self.chat_lines: list[str] = []
         self.active_top_tab = "trace"
+        self.trace_expanded = False
         self.pending_api_key_provider: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -363,10 +368,24 @@ class TitanTui(App[None]):
             diff_tab = self.query_one("#tab-diff", Button)
         except NoMatches:
             return
-        trace_tab.label = "Trace" if self.active_top_tab != "trace" else "Trace ●"
+        if self.active_top_tab == "trace":
+            trace_tab.label = "Trace ▾" if self.trace_expanded else "Trace ●"
+        else:
+            trace_tab.label = "Trace"
         diff_tab.label = "Diff" if self.active_top_tab != "diff" else "Diff ●"
         trace_tab.set_class(self.active_top_tab == "trace", "active-tab")
         diff_tab.set_class(self.active_top_tab == "diff", "active-tab")
+
+    def _set_trace_expanded(self, expanded: bool) -> None:
+        self.trace_expanded = expanded and self.active_top_tab == "trace"
+        try:
+            top = self.query_one("#top", Container)
+            output = self.query_one("#output", SelectableRichLog)
+        except NoMatches:
+            return
+        top.set_class(self.trace_expanded, "expanded")
+        output.display = not self.trace_expanded
+        self._refresh_top_tab_labels()
 
     def _set_top_tab(self, tab: str) -> None:
         if tab not in {"trace", "diff"}:
@@ -379,9 +398,18 @@ class TitanTui(App[None]):
             return
         trace.display = tab == "trace"
         diff.display = tab == "diff"
+        if tab != "trace":
+            self._set_trace_expanded(False)
         if tab == "diff":
             self._refresh_diff_tab()
         self._refresh_top_tab_labels()
+
+    def _toggle_trace_tab_expansion(self) -> None:
+        if self.active_top_tab != "trace":
+            self._set_top_tab("trace")
+            self._set_trace_expanded(True)
+            return
+        self._set_trace_expanded(not self.trace_expanded)
 
     def _style_diff_line(self, line: str) -> Text:
         if line.startswith("+") and not line.startswith("+++"):
@@ -866,7 +894,7 @@ class TitanTui(App[None]):
         if bid == "btn-stop":
             self.action_stop()
         elif bid == "tab-trace":
-            self._set_top_tab("trace")
+            self._toggle_trace_tab_expansion()
         elif bid == "tab-diff":
             self._set_top_tab("diff")
         elif bid == "btn-clear":
