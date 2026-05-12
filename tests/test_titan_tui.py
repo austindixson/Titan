@@ -101,14 +101,14 @@ def test_tui_trace_tab_click_expands_over_chat_and_click_again_minimizes(monkeyp
             await pilot.pause()
             assert app.trace_expanded is True
             assert top.has_class("expanded") is True
-            assert output.display is False
+            assert output.has_class("trace-hidden") is True
             assert str(app.query_one("#tab-trace", Button).label) == "Trace ▾"
 
             await pilot.click("#tab-trace")
             await pilot.pause()
             assert app.trace_expanded is False
             assert top.has_class("expanded") is False
-            assert output.display is True
+            assert output.has_class("trace-hidden") is False
             assert str(app.query_one("#tab-trace", Button).label) == "Trace ●"
 
     asyncio.run(_run())
@@ -309,6 +309,63 @@ def test_tui_tool_call_status_uses_harness_per_turn_count(monkeypatch):
             assert "tools_used_this_turn=2" in status
             assert app.ui.turn_tool_calls == 2
             assert app.ui.tool_calls == 2
+
+    asyncio.run(_run())
+
+
+def test_tui_progress_updates_chat_on_phase_transition_with_recaps_disabled(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            app.harness.config.chat_recaps_enabled = False
+            app.ui.pending = True
+            app.ui.started_at = 1.0
+            app.ui.state = "ACT"
+            app.ui.turn = 2
+            app.ui.tool_calls = 3
+            app.on_loop_event_msg(
+                titan_tui_module.LoopEventMsg(
+                    titan_tui_module.AgentEvent(
+                        "on_transition",
+                        {"from_state": "ACT", "to_state": "REFLECT", "turn": 2},
+                    )
+                )
+            )
+            progress_lines = [line for line in app.chat_lines if line.startswith("progress>")]
+            assert progress_lines
+            assert "finished ACT and moved to REFLECT" in progress_lines[-1]
+            assert "total tools 3" in progress_lines[-1]
+            assert not any(line.startswith("trace>") for line in app.chat_lines)
+
+    asyncio.run(_run())
+
+
+def test_tui_progress_updates_are_periodic_and_throttled(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+    now = {"value": 100.0}
+    monkeypatch.setattr("titan.titan_tui.time.time", lambda: now["value"])
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            app.ui.pending = True
+            app.ui.started_at = 90.0
+            app.ui.state = "ACT"
+            app.ui.turn = 1
+            app.last_progress_update_at = 100.0
+            app._record_progress_event("running tests")
+
+            now["value"] = 110.0
+            app._tick()
+            assert not [line for line in app.chat_lines if line.startswith("progress>")]
+
+            now["value"] = 116.0
+            app._tick()
+            progress_lines = [line for line in app.chat_lines if line.startswith("progress>")]
+            assert len(progress_lines) == 1
+            assert "running tests" in progress_lines[0]
 
     asyncio.run(_run())
 

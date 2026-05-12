@@ -237,6 +237,11 @@ class TitanTui(App[None]):
         min-height: 10;
         border: solid #3a3a3a;
     }
+    #output.trace-hidden {
+        height: 0;
+        min-height: 0;
+        border: none;
+    }
     #controls {
         height: 3;
         padding: 0 1;
@@ -300,6 +305,10 @@ class TitanTui(App[None]):
         self.chat_lines: list[str] = []
         self.active_top_tab = "trace"
         self.trace_expanded = False
+        self.progress_update_interval_seconds = 15.0
+        self.progress_events: list[str] = []
+        self.last_progress_update_at = 0.0
+        self.last_progress_signature = ""
         self.pending_api_key_provider: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -384,7 +393,7 @@ class TitanTui(App[None]):
         except NoMatches:
             return
         top.set_class(self.trace_expanded, "expanded")
-        output.display = not self.trace_expanded
+        output.set_class(self.trace_expanded, "trace-hidden")
         self._refresh_top_tab_labels()
 
     def _set_top_tab(self, tab: str) -> None:
@@ -452,6 +461,41 @@ class TitanTui(App[None]):
         for line in self.diff_lines:
             diff.write_selectable(self._style_diff_line(line), line)
 
+    def _record_progress_event(self, note: str) -> None:
+        note = self._compact(note, 120)
+        if not note:
+            return
+        self.progress_events.append(note)
+        self.progress_events = self.progress_events[-8:]
+
+    def _progress_summary(self) -> str:
+        recent = "; ".join(self.progress_events[-2:]) if self.progress_events else "working through the current step"
+        return (
+            f"{recent}. State {self.ui.state}, turn {self.ui.turn}, "
+            f"tools this turn {self.ui.turn_tool_calls}, total tools {self.ui.tool_calls}."
+        )
+
+    def _write_chat_progress(self, summary: str) -> None:
+        plain = f"progress> {summary}"
+        self.chat_lines.append(plain)
+        self.query_one("#output", SelectableRichLog).write_selectable(
+            Text(plain, style="dim #9aa0a6"),
+            plain,
+        )
+
+    def _maybe_emit_progress_update(self, *, force: bool = False) -> None:
+        if not self.ui.pending:
+            return
+        now = time.time()
+        if not force and now - self.last_progress_update_at < self.progress_update_interval_seconds:
+            return
+        summary = self._progress_summary()
+        if summary == self.last_progress_signature:
+            return
+        self._write_chat_progress(summary)
+        self.last_progress_update_at = now
+        self.last_progress_signature = summary
+
     def _tick(self) -> None:
         if self.ui.pending:
             self.ui.thinking_dots = (self.ui.thinking_dots + 1) % 4
@@ -460,6 +504,7 @@ class TitanTui(App[None]):
                 self.query_one("#assistant_line", Static).update(f"Titan: thinking{dots}")
             except NoMatches:
                 return
+            self._maybe_emit_progress_update()
         self._refresh_status()
 
     def _trace_emit(self, trace: RichLog, line: str, payload: dict | None = None) -> None:
@@ -608,6 +653,9 @@ class TitanTui(App[None]):
         self.ui.thinking_dots = 0
         self.ui.pending_tool_names.clear()
         self.ui.pending_tool_count = 0
+        self.progress_events.clear()
+        self.last_progress_update_at = time.time()
+        self.last_progress_signature = ""
         self.plan_shown_this_run = False
         self._refresh_status()
 
@@ -630,12 +678,16 @@ class TitanTui(App[None]):
             state = str(ev.payload.get("state", self.ui.state))
             reason = str(ev.payload.get("reason", ""))
             self.ui.state = state
+            self._record_progress_event(f"routed to {state}: {reason}")
             self._trace_emit(trace, f"route {state}: {reason}", ev.payload)
         elif ev.type == "iteration_started":
             self.ui.turn = int(ev.payload.get("iteration", self.ui.turn))
             self.ui.turn_tool_calls = 0
             self._trace_emit(trace, f"iteration {self.ui.turn}", ev.payload)
         elif ev.type == "provider_request":
+            self._record_progress_event(
+                f"asking {ev.payload.get('provider', self.harness.config.provider)} {ev.payload.get('model', self.harness.config.model)} for next step"
+            )
             self._trace_emit(
                 trace,
                 (
@@ -653,6 +705,7 @@ class TitanTui(App[None]):
             name = str(ev.payload.get("name", "")) or "tool"
             self._trace_emit(trace, f"stream tool-call {name}", ev.payload)
         elif ev.type == "empty_turn_recovery":
+            self._record_progress_event("recovering from an empty assistant turn after tool use")
             self._trace_emit(
                 trace,
                 (
@@ -671,11 +724,17 @@ class TitanTui(App[None]):
             self.ui.turn = int(ev.payload.get("turn", self.ui.turn))
             if self.ui.turn != prev_turn:
                 self.ui.turn_tool_calls = 0
+            self._record_progress_event(f"entered {self.ui.state} phase on turn {self.ui.turn}")
             self._trace_emit(trace, f"enter {self.ui.state} turn={self.ui.turn}", ev.payload)
             if self.ui.state != prev_state and self._chat_trace_mode() in ("normal", "full"):
                 self._emit_chat_trace(f"state {prev_state} -> {self.ui.state} (turn {self.ui.turn})")
         elif ev.type == "on_transition":
-            self._trace_emit(trace, f"transition {ev.payload.get('from_state')} -> {ev.payload.get('to_state')}", ev.payload)
+            from_state = ev.payload.get("from_state")
+            to_state = ev.payload.get("to_state")
+            self._record_progress_event(f"finished {from_state} and moved to {to_state}")
+            self._trace_emit(trace, f"transition {from_state} -> {to_state}", ev.payload)
+            if from_state != to_state:
+                self._maybe_emit_progress_update(force=True)
         elif ev.type == "assistant_message":
             text = str(ev.payload.get("text", "")).strip()
             if text:
@@ -687,10 +746,13 @@ class TitanTui(App[None]):
                 if state == "PLAN" and has_tool_calls and not self.plan_shown_this_run:
                     self._write_chat_box("Titan plan", text, "yellow")
                     self.plan_shown_this_run = True
+                    self._record_progress_event("planned the approach and started executing tools")
                 self._emit_chat_trace(f"reasoning {compact}")
         elif ev.type == "tool_batch_started":
+            self._record_progress_event(f"started {ev.payload.get('count')} tool call(s)")
             self._trace_emit(trace, f"tool-batch count={ev.payload.get('count')}", ev.payload)
         elif ev.type == "tool_batch_rejected":
+            self._record_progress_event("stopped an over-budget tool batch before execution")
             self._trace_emit(
                 trace,
                 (
@@ -708,11 +770,13 @@ class TitanTui(App[None]):
             self.ui.pending_tool_count += 1
             if name:
                 self.ui.pending_tool_names.append(name)
+            self._record_progress_event(f"running tool {name or 'unknown'}")
             self._trace_emit(trace, f"tool-call {name} args={compact_args}", ev.payload)
         elif ev.type == "tool_call_rejected":
             name = str(ev.payload.get("name", ""))
             args = str(ev.payload.get("arguments", ""))
             compact_args = self._compact(args, 120)
+            self._record_progress_event(f"rejected tool {name or 'unknown'} due to policy or budget")
             self._trace_emit(
                 trace,
                 (
@@ -726,6 +790,7 @@ class TitanTui(App[None]):
             is_error = bool(ev.payload.get("is_error"))
             content = str(ev.payload.get("content", "")).strip()
             compact_content = self._compact(content, 140)
+            self._record_progress_event(f"finished tool {name or 'unknown'} {'with an error' if is_error else 'successfully'}")
             self._trace_emit(
                 trace,
                 f"tool-result {name} err={is_error} output={compact_content}",
@@ -737,6 +802,7 @@ class TitanTui(App[None]):
                 )
             if self.active_top_tab == "diff":
                 self._refresh_diff_tab()
+            self._maybe_emit_progress_update()
         elif ev.type == "on_skill_created":
             self._trace_emit(trace, f"skill-created {ev.payload.get('path')}", ev.payload)
 
