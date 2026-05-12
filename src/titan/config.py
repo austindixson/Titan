@@ -8,6 +8,12 @@ from typing import Any
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".titan" / "config.json"
+RESILIENT_DEFAULT_MAX_ITERATIONS = 75
+RESILIENT_DEFAULT_MAX_WALL_CLOCK_MS = 600000
+RESILIENT_DEFAULT_MAX_TOOL_CALLS_TOTAL = 256
+LEGACY_LOW_MAX_ITERATIONS = 16
+LEGACY_LOW_MAX_WALL_CLOCK_MS = 120000
+LEGACY_LOW_MAX_TOOL_CALLS_TOTAL = 64
 
 
 @dataclass
@@ -26,10 +32,10 @@ class HarnessConfig:
     auth_mode: str = "oauth"
     oauth_token_env: str = "OPENAI_OAUTH_TOKEN"
     api_key_env: str = "OPENAI_API_KEY"
-    max_iterations: int = 75
-    max_wall_clock_ms: int = 600000
+    max_iterations: int = RESILIENT_DEFAULT_MAX_ITERATIONS
+    max_wall_clock_ms: int = RESILIENT_DEFAULT_MAX_WALL_CLOCK_MS
     max_tool_calls_per_iteration: int = 8
-    max_tool_calls_total: int = 256
+    max_tool_calls_total: int = RESILIENT_DEFAULT_MAX_TOOL_CALLS_TOTAL
     max_consecutive_empty_turns: int = 3
     chat_recaps_enabled: bool = False
     learning_enabled: bool = False
@@ -78,6 +84,36 @@ def _load_file_config(path: Path) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _migrate_legacy_low_budgets(path: Path, data: dict[str, Any]) -> None:
+    """Lift old short-task defaults so Titan keeps pushing through coding work.
+
+    Early local configs used 16 iterations / 2 minutes / 64 total tools. That
+    budget is too small for medium TUI coding tasks that inspect, edit, and
+    validate a project. Only migrate that exact low-budget profile (or lower)
+    so deliberate custom budgets are otherwise preserved.
+    """
+    if not data:
+        return
+    try:
+        is_legacy_low_profile = (
+            int(data.get("max_iterations", RESILIENT_DEFAULT_MAX_ITERATIONS)) <= LEGACY_LOW_MAX_ITERATIONS
+            and int(data.get("max_wall_clock_ms", RESILIENT_DEFAULT_MAX_WALL_CLOCK_MS)) <= LEGACY_LOW_MAX_WALL_CLOCK_MS
+            and int(data.get("max_tool_calls_total", RESILIENT_DEFAULT_MAX_TOOL_CALLS_TOTAL)) <= LEGACY_LOW_MAX_TOOL_CALLS_TOTAL
+        )
+    except Exception:
+        return
+    if not is_legacy_low_profile:
+        return
+    data["max_iterations"] = RESILIENT_DEFAULT_MAX_ITERATIONS
+    data["max_wall_clock_ms"] = RESILIENT_DEFAULT_MAX_WALL_CLOCK_MS
+    data["max_tool_calls_total"] = RESILIENT_DEFAULT_MAX_TOOL_CALLS_TOTAL
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n")
+    except Exception:
+        pass
+
+
 def resolve_config_path(path_override: str | None = None) -> Path:
     if path_override:
         return Path(path_override).expanduser().resolve()
@@ -93,7 +129,9 @@ def load_harness_config(
     config_path_override: str | None = None,
 ) -> HarnessConfig:
     cfg = HarnessConfig()
-    data = _load_file_config(resolve_config_path(config_path_override))
+    path = resolve_config_path(config_path_override)
+    data = _load_file_config(path)
+    _migrate_legacy_low_budgets(path, data)
 
     cfg.provider = str(_deep_get(data, "provider", cfg.provider))
     cfg.model = str(_deep_get(data, "model", cfg.model))
@@ -162,10 +200,10 @@ def write_default_config(path: Path, force: bool = False) -> bool:
         "api_base": "",
         "api_keys": {},
         "permission_mode": "allow",
-        "max_iterations": 75,
-        "max_wall_clock_ms": 600000,
+        "max_iterations": RESILIENT_DEFAULT_MAX_ITERATIONS,
+        "max_wall_clock_ms": RESILIENT_DEFAULT_MAX_WALL_CLOCK_MS,
         "max_tool_calls_per_iteration": 8,
-        "max_tool_calls_total": 256,
+        "max_tool_calls_total": RESILIENT_DEFAULT_MAX_TOOL_CALLS_TOTAL,
         "max_consecutive_empty_turns": 3,
         "chat_recaps_enabled": False,
         "learning_enabled": False,

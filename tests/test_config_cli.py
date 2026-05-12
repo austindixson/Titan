@@ -25,6 +25,33 @@ def test_write_default_and_load(monkeypatch, tmp_path: Path):
     assert cfg.learning_enabled is False
 
 
+def test_legacy_low_budget_config_is_migrated_for_resilient_tui_tasks(monkeypatch, tmp_path: Path):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("TITAN_CONFIG_PATH", str(cfg_path))
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "provider": "openai-codex",
+                "model": "gpt-5.4",
+                "max_iterations": 16,
+                "max_wall_clock_ms": 120000,
+                "max_tool_calls_per_iteration": 8,
+                "max_tool_calls_total": 64,
+            }
+        )
+    )
+
+    cfg = load_harness_config()
+    data = json.loads(cfg_path.read_text())
+
+    assert cfg.max_iterations == 75
+    assert cfg.max_wall_clock_ms == 600000
+    assert cfg.max_tool_calls_total == 256
+    assert data["max_iterations"] == 75
+    assert data["max_wall_clock_ms"] == 600000
+    assert data["max_tool_calls_total"] == 256
+
+
 def test_env_overrides_long_task_budgets(monkeypatch, tmp_path: Path):
     cfg_path = tmp_path / "config.json"
     monkeypatch.setenv("TITAN_CONFIG_PATH", str(cfg_path))
