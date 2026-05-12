@@ -135,6 +135,24 @@ def test_tui_paste_file_uri_normalizes_to_absolute_path(monkeypatch, tmp_path):
     asyncio.run(_run())
 
 
+def test_tui_paste_long_natural_language_does_not_probe_as_path(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+    pasted = (
+        "There's a folder on my desktop called AI Chat. I want you to open that folder, "
+        "analyze the project, and then I want you to finish it by adding whatever you think "
+        "would be great to make it a million-dollar chat website like an AI product. "
+        "You know you've got all the tools you need. Surprise me."
+    )
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            composer = app.query_one("#input", titan_tui_module.ComposerTextArea)
+            assert composer.normalize_paste_for_display(pasted) == pasted
+
+    asyncio.run(_run())
+
+
 def test_tui_input_enter_submits_instead_of_inserting_newline(monkeypatch):
     _patch_tui_deps(monkeypatch)
 

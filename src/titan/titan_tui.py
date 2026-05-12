@@ -87,15 +87,22 @@ class ComposerTextArea(TextArea):
         raw = token.strip().strip('"').strip("'")
         if not raw:
             return None
-        if raw.startswith("file://"):
+        is_file_uri = raw.startswith("file://")
+        if is_file_uri:
             parsed = urlparse(raw)
             raw = unquote(parsed.path)
         raw = raw.replace("\\ ", " ")
+        looks_pathlike = is_file_uri or raw.startswith(("/", "~/", "./", "../")) or "/" in raw
+        if not looks_pathlike:
+            return None
         path = Path(raw).expanduser()
         if not path.is_absolute():
             path = (Path.cwd() / path).resolve()
-        if path.exists():
-            return str(path)
+        try:
+            if path.exists():
+                return str(path)
+        except OSError:
+            return None
         return None
 
     def _normalize_file_drop(self, text: str) -> str | None:
