@@ -1,14 +1,22 @@
 from __future__ import annotations
+import base64
 import json
+import mimetypes
 import random
+import shlex
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib import request, error
+from urllib.parse import unquote, urlparse
 
-from .types import AssistantResponse, Message, ToolCall
+from .types import AssistantResponse, Message, Role, ToolCall
 from typing import Any
 from .auth import resolve_provider_credentials
 from .config import RetryConfig, HarnessConfig
+
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
 class ProviderError(Exception):
@@ -137,11 +145,61 @@ class OpenAICompatProvider(Provider):
             return "".join(text_parts)
         return ""
 
+    def _candidate_paths_from_text(self, text: str) -> list[Path]:
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            tokens = text.split()
+        paths: list[Path] = []
+        for token in tokens:
+            cleaned = token.strip().strip("`\"'“”‘’()[]{}<>,")
+            if cleaned.startswith("file://"):
+                parsed = urlparse(cleaned)
+                cleaned = unquote(parsed.path)
+            else:
+                cleaned = unquote(cleaned)
+            if not cleaned:
+                continue
+            path = Path(cleaned).expanduser()
+            if path.suffix.lower() in IMAGE_EXTENSIONS and path.exists() and path.is_file():
+                paths.append(path.resolve())
+        return paths
+
+    def _image_data_url(self, path: Path) -> str:
+        mime = mimetypes.guess_type(str(path))[0] or "image/png"
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+
+    def _chat_content_for_message(self, message: Message) -> str | list[dict[str, Any]]:
+        if message.role != Role.USER:
+            return message.content
+        images = self._candidate_paths_from_text(message.content)
+        if not images:
+            return message.content
+        content: list[dict[str, Any]] = [{"type": "text", "text": message.content}]
+        for image in images:
+            content.append({"type": "image_url", "image_url": {"url": self._image_data_url(image)}})
+        return content
+
+    def _chat_messages_payload(self, messages: list[Message]) -> list[dict[str, Any]]:
+        return [{"role": m.role.value, "content": self._chat_content_for_message(m)} for m in messages]
+
+    def _responses_message_content(self, message: Message) -> str | list[dict[str, Any]]:
+        if message.role != Role.USER:
+            return message.content
+        images = self._candidate_paths_from_text(message.content)
+        if not images:
+            return message.content
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": message.content}]
+        for image in images:
+            content.append({"type": "input_image", "image_url": self._image_data_url(image)})
+        return content
+
     def _generate_chat_completions(self, base: str, token: str, model: str, messages: list[Message], tools: list[dict], on_event=None) -> AssistantResponse:
         url = f"{base.rstrip('/')}/chat/completions"
         payload = {
             "model": model,
-            "messages": [{"role": m.role.value, "content": m.content} for m in messages],
+            "messages": self._chat_messages_payload(messages),
             "tools": tools,
             "tool_choice": "auto",
             "temperature": 0,
@@ -268,7 +326,7 @@ class OpenAICompatProvider(Provider):
         input_items: list[dict[str, Any]] = []
         for m in messages:
             if m.role.value in ("user", "assistant"):
-                input_items.append({"role": m.role.value, "content": m.content})
+                input_items.append({"role": m.role.value, "content": self._responses_message_content(m)})
             elif m.role.value == "tool":
                 call_id = m.tool_call_id or ""
                 tool_name = m.tool_name or "tool"
