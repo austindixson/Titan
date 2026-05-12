@@ -1,5 +1,7 @@
 import asyncio
 
+from rich.panel import Panel
+from rich.text import Text
 from textual.widgets import Button, Input, TextArea
 
 from titan.config import HarnessConfig
@@ -264,6 +266,32 @@ def test_tui_chat_output_is_boxed_and_brevity_limited(monkeypatch):
             assert output.selection_lines[-1] == app.chat_lines[-1]
 
     asyncio.run(_run())
+
+
+def test_tui_user_messages_are_bold_text_without_panel_border(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+    app = TitanTui()
+
+    renderable = app._chat_renderable("You", "describe this image", "cyan")
+
+    assert isinstance(renderable, Text)
+    assert not isinstance(renderable, Panel)
+    assert "bold" in str(renderable.style)
+    assert "describe this image" in renderable.plain
+
+
+def test_tui_chat_truncation_prefers_finished_sentence_with_grace(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+    app = TitanTui()
+    first = "This is the first complete sentence about the image."
+    second = " It adds a useful final detail that should be allowed to finish."
+    over = " extra" * 100
+
+    brief = app._brief_chat_text(first + second + over, max_chars=len(first) + 8, max_lines=20, grace_chars=len(second) + 5)
+
+    assert (first + second).strip() in brief
+    assert not brief.endswith("finish.…")
+    assert "[truncated in chat" in brief
 
 
 def test_tui_copy_buffers_use_pbcopy(monkeypatch):

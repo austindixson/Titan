@@ -412,33 +412,52 @@ class TitanTui(App[None]):
         compact = " ".join(text.split())
         return compact if len(compact) <= limit else compact[: limit - 1] + "…"
 
-    def _brief_chat_text(self, text: str, max_chars: int = 1400, max_lines: int = 12) -> str:
+    def _sentence_aware_clip(self, text: str, max_chars: int, grace_chars: int) -> tuple[str, bool]:
+        if len(text) <= max_chars + grace_chars:
+            return text, False
+        window = text[: max_chars + grace_chars]
+        floor = max(0, int(max_chars * 0.6))
+        best = -1
+        for marker in (". ", "! ", "? ", ".\n", "!\n", "?\n"):
+            pos = window.rfind(marker)
+            if pos >= floor:
+                best = max(best, pos + 1)
+        if best < 0:
+            best = max_chars
+        return window[:best].rstrip() + "…", True
+
+    def _brief_chat_text(self, text: str, max_chars: int = 1400, max_lines: int = 12, grace_chars: int = 320) -> str:
         stripped = text.strip()
-        lines = stripped.splitlines()
         clipped = False
+        out, char_clipped = self._sentence_aware_clip(stripped, max_chars, grace_chars)
+        clipped = clipped or char_clipped
+        lines = out.splitlines()
         if len(lines) > max_lines:
-            lines = lines[:max_lines]
-            clipped = True
-        out = "\n".join(lines)
-        if len(out) > max_chars:
-            out = out[: max_chars - 1].rstrip() + "…"
+            out = "\n".join(lines[:max_lines]).rstrip()
+            if not out.endswith("…"):
+                out += "…"
             clipped = True
         if clipped:
             out += "\n[truncated in chat; full details remain in trace/session logs]"
         return out
 
+    def _chat_renderable(self, speaker: str, body: str, border_style: str):
+        if speaker == "You":
+            return Text(f"{speaker}\n{body}", style=f"bold {border_style}")
+        return Panel(
+            Text(body),
+            title=speaker,
+            title_align="left",
+            border_style=border_style,
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+
     def _write_chat_box(self, speaker: str, text: str, border_style: str) -> None:
         body = self._brief_chat_text(text)
         self.chat_lines.append(f"{speaker}: {body}")
         self.query_one("#output", SelectableRichLog).write_selectable(
-            Panel(
-                Text(body),
-                title=speaker,
-                title_align="left",
-                border_style=border_style,
-                box=box.ROUNDED,
-                padding=(0, 1),
-            ),
+            self._chat_renderable(speaker, body, border_style),
             f"{speaker}: {body}",
         )
 
