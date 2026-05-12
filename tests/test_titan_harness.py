@@ -13,9 +13,11 @@ class CapturingProvider(Provider):
     def __init__(self, response: AssistantResponse):
         self.response = response
         self.calls: list[list[Message]] = []
+        self.tool_defs: list[list[dict]] = []
 
     def generate(self, model: str, messages: list[Message], tools: list[dict]) -> AssistantResponse:
         self.calls.append(messages)
+        self.tool_defs.append(tools)
         return self.response
 
 
@@ -80,6 +82,35 @@ def test_titan_harness_routes_simple_chat_to_direct_reply_mode(tmp_path: Path):
     assert out.stop.reason == RunStopReason.AssistantFinal
     assert [p["state"] for t, p in events if t == "route_decision"] == [OrchestratorState.ACT.value]
     assert "Reply directly" in provider.calls[0][0].content
+
+
+def test_titan_harness_instructs_image_tasks_to_use_attached_pixels_not_browser(tmp_path: Path):
+    image = tmp_path / "Screenshot 2026-05-12 at 5.47.12 AM.png"
+    image.write_bytes(b"fake-png")
+    provider = CapturingProvider(AssistantResponse(text="I can see the image prompt."))
+    harness = TitanHarness(
+        provider=provider,
+        tools=default_registry(),
+        config=HarnessConfig(permission_mode="allow"),
+        session_store=SessionStore(str(tmp_path / "session.jsonl")),
+    )
+    events = []
+
+    out = harness.run_with_callback(
+        f"`{image}` Execute the prompt in the image.",
+        [Message(role=Role.SYSTEM, content="You are Titan.")],
+        on_event=lambda e: events.append((e.type, e.payload)),
+    )
+
+    assert out.stop.reason == RunStopReason.AssistantFinal
+    system_prompt = provider.calls[0][0].content
+    assert "Local image attachment guidance" in system_prompt
+    assert "analyze the attached image pixels directly" in system_prompt
+    assert "Do not call browser_navigate" in system_prompt
+    assert "do not ask the user to upload it again" in system_prompt
+    tool_names = [tool.get("function", {}).get("name") for tool in provider.tool_defs[0]]
+    assert "browser_navigate" not in tool_names
+    assert [payload["count"] for event_type, payload in events if event_type == "image_attachments_detected"] == [1]
 
 
 def test_titan_harness_routes_delegation_requests_to_delegate_mode(tmp_path: Path):

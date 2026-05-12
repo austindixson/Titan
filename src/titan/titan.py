@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .config import HarnessConfig
+from .image_paths import candidate_image_paths_from_text
 from .loop import AgentEvent
 from .permissions import PermissionError, PermissionPolicy
 from .provider import Provider, ProviderError, retry_call
@@ -179,6 +180,20 @@ def _format_iteration_budget_plan(plan: dict[str, Any]) -> str:
     )
 
 
+def _format_image_attachment_guidance(paths: list[Path]) -> str:
+    if not paths:
+        return ""
+    path_lines = "\n".join(f"- {path}" for path in paths)
+    return (
+        "Local image attachment guidance:\n"
+        "The user supplied local image path(s), and the provider request includes them as image attachments when supported.\n"
+        f"{path_lines}\n"
+        "For image/screenshot tasks, analyze the attached image pixels directly. "
+        "Do not call browser_navigate or web tools for these local file paths. "
+        "Do not say you cannot read the local path and do not ask the user to upload it again unless the provider returns an explicit image/vision error."
+    )
+
+
 class IntentRouter:
     DIRECT_KEYWORDS = {
         "hi", "hello", "hey", "yo", "thanks", "thank you", "ok", "okay", "yes", "no",
@@ -241,6 +256,8 @@ class TitanHarness:
         route_decision = self.router.decide(task)
         plan_budget = _iteration_budget_plan(self.config, route_decision)
         plan_budget_text = _format_iteration_budget_plan(plan_budget)
+        image_paths = candidate_image_paths_from_text(task)
+        image_guidance_text = _format_image_attachment_guidance(image_paths)
         session = TitanSession(goal=task, trace_id=trace_id, current_state=route_decision.state)
         self.session_store.checkpoint(session.current_state.value, 0, f"run_start:{route_decision.reason}")
         self._append(history, Message(role=Role.USER, content=task))
@@ -255,6 +272,8 @@ class TitanHarness:
 
         emit("route_decision", state=route_decision.state.value, reason=route_decision.reason, instruction=route_decision.instruction)
         emit("plan_budget", **plan_budget)
+        if image_paths:
+            emit("image_attachments_detected", count=len(image_paths), paths=[str(path) for path in image_paths])
 
         while session.turn < self.config.max_iterations:
             session.turn += 1
@@ -278,6 +297,8 @@ class TitanHarness:
             context = self.memory.get_relevant_context(session.goal, session.context_budget)
             session.trace.append({"turn": session.turn, "state": session.current_state.value, "context_len": len(context)})
             tools = self.tools.definitions()
+            if image_paths:
+                tools = [tool for tool in tools if tool.get("function", {}).get("name") != "browser_navigate"]
             emit(
                 "provider_request",
                 iteration=session.turn,
@@ -292,7 +313,7 @@ class TitanHarness:
                 resp = retry_call(
                     lambda: self.provider.generate_with_callback(
                         self.config.model,
-                        self._provider_history(history, route_decision, plan_budget_text),
+                        self._provider_history(history, route_decision, plan_budget_text, image_guidance_text),
                         tools,
                         on_event=lambda event_type, **event_payload: emit(f"provider_{event_type}", **event_payload),
                     ),
@@ -473,15 +494,22 @@ class TitanHarness:
             ),
         )
 
-    def _provider_history(self, history: list[Message], decision: RouteDecision, plan_budget_text: str = "") -> list[Message]:
+    def _provider_history(
+        self,
+        history: list[Message],
+        decision: RouteDecision,
+        plan_budget_text: str = "",
+        image_guidance_text: str = "",
+    ) -> list[Message]:
         route_text = (
             "Titan routing decision:\n"
             f"- mode: {decision.state.value}\n"
             f"- reason: {decision.reason}\n"
             f"- instruction: {decision.instruction}"
         )
-        if plan_budget_text:
-            route_text = f"{route_text}\n\n{plan_budget_text}"
+        extra_sections = [section for section in (plan_budget_text, image_guidance_text) if section]
+        if extra_sections:
+            route_text = f"{route_text}\n\n" + "\n\n".join(extra_sections)
         if history and history[0].role == Role.SYSTEM:
             return [Message(role=Role.SYSTEM, content=f"{history[0].content}\n\n{route_text}"), *history[1:]]
         return [Message(role=Role.SYSTEM, content=route_text), *history]

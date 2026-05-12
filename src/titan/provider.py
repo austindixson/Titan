@@ -3,21 +3,16 @@ import base64
 import json
 import mimetypes
 import random
-import re
-import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib import request, error
-from urllib.parse import unquote, urlparse
 
 from .types import AssistantResponse, Message, Role, ToolCall
 from typing import Any
 from .auth import resolve_provider_credentials
 from .config import RetryConfig, HarnessConfig
-
-
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+from .image_paths import candidate_image_paths_from_text
 
 
 class ProviderError(Exception):
@@ -147,43 +142,7 @@ class OpenAICompatProvider(Provider):
         return ""
 
     def _candidate_paths_from_text(self, text: str) -> list[Path]:
-        paths: list[Path] = []
-        seen: set[Path] = set()
-
-        def add_candidate(raw: str) -> None:
-            cleaned = raw.strip().strip("`\"'“”‘’()[]{}<>,")
-            if cleaned.startswith("file://"):
-                parsed = urlparse(cleaned)
-                cleaned = unquote(parsed.path)
-            else:
-                cleaned = unquote(cleaned)
-            if not cleaned:
-                return
-            path = Path(cleaned).expanduser()
-            if path.suffix.lower() not in IMAGE_EXTENSIONS:
-                return
-            if not path.exists() or not path.is_file():
-                return
-            resolved = path.resolve()
-            if resolved not in seen:
-                seen.add(resolved)
-                paths.append(resolved)
-
-        try:
-            tokens = shlex.split(text)
-        except ValueError:
-            tokens = text.split()
-        for token in tokens:
-            add_candidate(token)
-
-        extension_pattern = "|".join(re.escape(ext.lstrip(".")) for ext in sorted(IMAGE_EXTENSIONS, key=len, reverse=True))
-        path_pattern = re.compile(
-            rf"(?:file://)?(?:~|/)[^\n`\"'<>]*?\.(?:{extension_pattern})",
-            flags=re.IGNORECASE,
-        )
-        for match in path_pattern.finditer(text):
-            add_candidate(match.group(0))
-        return paths
+        return candidate_image_paths_from_text(text)
 
     def _image_data_url(self, path: Path) -> str:
         mime = mimetypes.guess_type(str(path))[0] or "image/png"
