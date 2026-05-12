@@ -198,6 +198,7 @@ class TitanTui(App[None]):
         ("ctrl+r", "toggle_trace_verbosity", "Trace mode"),
         ("ctrl+p", "cycle_provider", "Provider"),
         ("ctrl+g", "stop", "Stop"),
+        ("ctrl+c", "close_titan_instance", "Close Titan"),
         ("ctrl+q", "quit", "Quit"),
     ]
 
@@ -895,6 +896,16 @@ class TitanTui(App[None]):
 
     def action_stop(self) -> None:
         self._write_trace("stop requested (not yet wired to engine)")
+
+    def action_close_titan_instance(self) -> None:
+        self.ui.pending = False
+        self.ui.started_at = None
+        self.ui.pending_tool_names.clear()
+        self.ui.pending_tool_count = 0
+        self.ui.turn_tool_calls = 0
+        self.query_one("#assistant_line", Static).update("Titan: instance closed")
+        self._write_trace("current Titan instance closed; app remains open")
+        self._refresh_status()
 
     def action_operator_input(self) -> None:
         self._write_trace("operator input: type in bottom box and press Enter")

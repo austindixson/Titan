@@ -58,6 +58,35 @@ def test_tui_focus_input_hotkey_moves_off_ctrl_o(monkeypatch):
     assert ("ctrl+o", "operator_input") not in bindings
 
 
+def test_tui_ctrl_c_closes_current_titan_instance_not_entire_app(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+    bindings = {(binding[0], binding[1], binding[2]) for binding in TitanTui.BINDINGS}
+
+    assert ("ctrl+c", "close_titan_instance", "Close Titan") in bindings
+    assert ("ctrl+c", "quit", "Quit") not in bindings
+
+    async def _run():
+        app = TitanTui()
+        exit_called = False
+
+        def fake_exit(*args, **kwargs):
+            nonlocal exit_called
+            exit_called = True
+
+        async with app.run_test(size=(100, 32)):
+            monkeypatch.setattr(app, "exit", fake_exit)
+            app.ui.pending = True
+            app.ui.pending_tool_names.append("shell")
+            app.action_close_titan_instance()
+
+            assert exit_called is False
+            assert app.ui.pending is False
+            assert app.ui.pending_tool_names == []
+            assert str(app.query_one("#assistant_line", titan_tui_module.Static).render()) == "Titan: instance closed"
+
+    asyncio.run(_run())
+
+
 def test_tui_top_panel_tabs_switch_trace_and_diff(monkeypatch):
     _patch_tui_deps(monkeypatch)
 
