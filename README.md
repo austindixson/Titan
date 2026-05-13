@@ -16,14 +16,5 @@ Behavior depends on model/provider and local runtime constraints.
 
 ## Visual Overview
 
-![Install flow](docs/assets/install-flow.png)
+![Titan visual overview](docs/assets/visual-overview-titan.svg)
 
-![Setup flow](docs/assets/setup-flow.png)
-
-To regenerate these visuals:
-
-```bash
-cd docs/remotion
-npm install
-npm run render:all
-```
