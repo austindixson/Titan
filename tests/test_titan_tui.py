@@ -33,6 +33,7 @@ def test_tui_controls_are_limited_to_stop_provider_operator_trace_quit(monkeypat
                 "tab-diff": "Diff",
                 "btn-stop": "Stop",
                 "btn-provider": "Provider: openai",
+                "btn-theme": "Theme: ocean",
                 "btn-clear": "Clear",
                 "btn-trace": "Trace: normal",
                 "btn-quit": "Quit",
@@ -50,12 +51,15 @@ def test_tui_trace_defaults_normal_and_small(monkeypatch):
     assert "#top {\n        height: 6;\n        min-height: 6;" in app.CSS
 
 
-def test_tui_focus_input_hotkey_moves_off_ctrl_o(monkeypatch):
+def test_tui_hotkeys_include_focus_provider_and_theme(monkeypatch):
     _patch_tui_deps(monkeypatch)
-    bindings = {(binding[0], binding[1]) for binding in TitanTui.BINDINGS}
+    bindings2 = {(binding[0], binding[1]) for binding in TitanTui.BINDINGS}
+    bindings3 = {(binding[0], binding[1], binding[2]) for binding in TitanTui.BINDINGS}
 
-    assert ("ctrl+f", "operator_input") in bindings
-    assert ("ctrl+o", "operator_input") not in bindings
+    assert ("ctrl+f", "operator_input") in bindings2
+    assert ("ctrl+o", "operator_input") not in bindings2
+    assert ("ctrl+p", "cycle_provider", "Provider") in bindings3
+    assert ("ctrl+n", "cycle_theme", "Theme") in bindings3
 
 
 def test_tui_ctrl_c_cancels_then_quits(monkeypatch):
@@ -136,7 +140,7 @@ def test_tui_trace_tab_click_expands_over_chat_and_click_again_minimizes(monkeyp
             assert output.has_class("trace-hidden") is True
             assert str(app.query_one("#tab-trace", Button).label) == "Trace ▾"
 
-            await pilot.click("#tab-trace")
+            app._toggle_active_top_tab_expansion()
             await pilot.pause()
             assert app.top_tab_expanded is False
             assert top.has_class("expanded") is False
@@ -167,19 +171,47 @@ def test_tui_diff_tab_click_expands_over_chat_and_click_again_minimizes(monkeypa
             assert output.has_class("trace-hidden") is False
             assert str(app.query_one("#tab-diff", Button).label) == "Diff ●"
 
-            await pilot.click("#tab-diff")
+            app._toggle_active_top_tab_expansion()
             await pilot.pause()
             assert app.top_tab_expanded is True
             assert top.has_class("expanded") is True
             assert output.has_class("trace-hidden") is True
             assert str(app.query_one("#tab-diff", Button).label) == "Diff ▾"
 
-            await pilot.click("#tab-diff")
+            app._toggle_active_top_tab_expansion()
             await pilot.pause()
             assert app.top_tab_expanded is False
             assert top.has_class("expanded") is False
             assert output.has_class("trace-hidden") is False
             assert str(app.query_one("#tab-diff", Button).label) == "Diff ●"
+
+    asyncio.run(_run())
+
+
+def test_tui_clicking_logs_focuses_them_and_buttons_still_work(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)) as pilot:
+            output = app.query_one("#output", titan_tui_module.SelectableRichLog)
+            trace = app.query_one("#trace", titan_tui_module.SelectableRichLog)
+            composer = app.query_one("#input", titan_tui_module.ComposerTextArea)
+
+            composer.load_text("to-clear")
+            await pilot.click("#output")
+            await pilot.pause()
+            assert app.focused is output
+
+            await pilot.click("#tab-trace")
+            await pilot.pause()
+            await pilot.click("#trace")
+            await pilot.pause()
+            assert app.focused is trace
+
+            await pilot.click("#btn-clear")
+            await pilot.pause()
+            assert composer.text == ""
 
     asyncio.run(_run())
 
@@ -564,9 +596,41 @@ def test_tui_provider_selection_prompts_and_saves_missing_api_key(monkeypatch):
             assert app.pending_api_key_provider is None
             assert key_input.display is False
             assert app.harness.config.api_keys["xai"] == "xai-test-key"
+            assert app.harness.config.model == "grok-3-mini"
 
     asyncio.run(_run())
-    assert saved == [("api_keys.xai", "xai-test-key")]
+    assert ("provider", "xai") in saved
+    assert ("model", "grok-3-mini") in saved
+    assert ("api_keys.xai", "xai-test-key") in saved
+
+
+def test_tui_provider_cycle_sets_zai_default_model(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+    monkeypatch.setattr("titan.titan_tui.resolve_provider_credentials", lambda *args, **kwargs: None)
+
+    async def _run():
+        app = TitanTui()
+        app.provider_options = ["openai", "zai"]
+        async with app.run_test(size=(100, 32)):
+            app.action_cycle_provider()
+            assert app.harness.config.provider == "zai"
+            assert app.harness.config.model == "glm-5.1"
+
+    asyncio.run(_run())
+
+
+def test_tui_theme_cycle_updates_label(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        async with app.run_test(size=(100, 32)):
+            btn = app.query_one("#btn-theme", Button)
+            assert str(btn.label) == "Theme: ocean"
+            app.action_cycle_theme()
+            assert str(btn.label) == "Theme: sunset"
+
+    asyncio.run(_run())
 
 
 def test_tui_trace_shows_rejected_tool_calls(monkeypatch):

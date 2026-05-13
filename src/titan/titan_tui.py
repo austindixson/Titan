@@ -54,22 +54,30 @@ class LoopDoneMsg(TextualMessage):
         super().__init__()
 
 
-class SelectableRichLog(RichLog):
-    ALLOW_SELECT = True
+class SelectableRichLog(TextArea):
+    """Read-only text pane with reliable mouse drag-selection in terminal UIs."""
 
     def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+        wrap = kwargs.pop("wrap", None)
+        kwargs.setdefault("read_only", True)
+        kwargs.setdefault("soft_wrap", True if wrap is None else bool(wrap))
+        kwargs.setdefault("show_cursor", False)
+        kwargs.setdefault("show_line_numbers", False)
+        super().__init__("", *args, **kwargs)
         self.selection_lines: list[str] = []
 
     def write_selectable(self, renderable, plain: str | None = None) -> None:
-        self.selection_lines.append(str(renderable if plain is None else plain))
-        self.write(renderable)
+        display_line = str(renderable)
+        selection_line = str(plain) if plain is not None else display_line
+        self.selection_lines.append(selection_line)
+        if self.text:
+            self.load_text(f"{self.text}\n{display_line}")
+        else:
+            self.load_text(display_line)
 
-    def get_selection(self, selection):
-        return selection.extract("\n".join(self.selection_lines)), "\n"
-
-    def selection_updated(self, selection) -> None:
-        self.refresh()
+    def clear(self) -> None:
+        self.selection_lines.clear()
+        self.load_text("")
 
 
 class ComposerTextArea(TextArea):
@@ -197,6 +205,7 @@ class TitanTui(App[None]):
         ("ctrl+f", "operator_input", "Focus input"),
         ("ctrl+r", "toggle_trace_verbosity", "Trace mode"),
         ("ctrl+p", "cycle_provider", "Provider"),
+        ("ctrl+n", "cycle_theme", "Theme"),
         ("ctrl+g", "stop", "Stop"),
         ("ctrl+c", "handle_ctrl_c", "Cancel/Quit"),
         ("ctrl+q", "quit", "Quit"),
@@ -312,6 +321,13 @@ class TitanTui(App[None]):
         self.last_progress_signature = ""
         self.pending_api_key_provider: str | None = None
         self.ctrl_c_quit_armed = False
+        self.themes = [
+            {"name": "ocean", "plan": "cyan", "titan": "green"},
+            {"name": "sunset", "plan": "yellow", "titan": "magenta"},
+            {"name": "ember", "plan": "red", "titan": "yellow"},
+            {"name": "violet", "plan": "blue", "titan": "cyan"},
+        ]
+        self.theme_index = 0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -319,12 +335,13 @@ class TitanTui(App[None]):
             with Horizontal(id="top_tabs"):
                 yield Button("Trace", id="tab-trace")
                 yield Button("Diff", id="tab-diff")
-            yield SelectableRichLog(id="trace", wrap=True)
-            yield SelectableRichLog(id="diff", wrap=True)
-        yield SelectableRichLog(id="output", wrap=True)
+            yield SelectableRichLog(id="trace", soft_wrap=True)
+            yield SelectableRichLog(id="diff", soft_wrap=True)
+        yield SelectableRichLog(id="output", soft_wrap=True)
         with Horizontal(id="controls"):
             yield Button("Stop", id="btn-stop")
             yield Button(f"Provider: {self.cfg.provider}", id="btn-provider")
+            yield Button("Theme: ocean", id="btn-theme")
             yield Button("Clear", id="btn-clear")
             yield Button(f"Trace: {self._chat_trace_mode()}", id="btn-trace")
             yield Button("Quit", id="btn-quit", variant="error")
@@ -371,6 +388,7 @@ class TitanTui(App[None]):
 
         provider = self.harness.config.provider
         self.query_one("#btn-provider", Button).label = f"Provider: {provider}"
+        self.query_one("#btn-theme", Button).label = f"Theme: {self.themes[self.theme_index]['name']}"
         self._refresh_top_tab_labels()
 
     def _refresh_top_tab_labels(self) -> None:
@@ -545,17 +563,43 @@ class TitanTui(App[None]):
     def _brief_chat_text(self, text: str, max_chars: int = 1400, max_lines: int = 12, grace_chars: int = 320) -> str:
         return text.strip()
 
+    def _theme_color_for_speaker(self, speaker: str, requested: str) -> str:
+        theme = self.themes[self.theme_index]
+        if speaker.startswith("Titan plan"):
+            return str(theme["plan"])
+        if speaker.startswith("Titan"):
+            return str(theme["titan"])
+        return requested
+
+    def _ansi(self, color: str, text: str) -> str:
+        codes = {
+            "red": "31",
+            "green": "32",
+            "yellow": "33",
+            "blue": "34",
+            "magenta": "35",
+            "cyan": "36",
+            "white": "37",
+        }
+        code = codes.get(color)
+        if not code:
+            return text
+        return f"\x1b[{code}m{text}\x1b[0m"
+
     def _chat_renderable(self, speaker: str, body: str, border_style: str):
         if speaker == "You":
             return Text(f"• {body}", style="bold")
-        return Panel(
-            Text(body),
-            title=speaker,
-            title_align="left",
-            border_style=border_style,
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
+        border_color = self._theme_color_for_speaker(speaker, border_style)
+        lines = body.splitlines() or [""]
+        title = f" {speaker} "
+        inner_width = max(len(title), *(len(line) for line in lines))
+        top_raw = "╭" + title + "─" * (inner_width - len(title)) + "╮"
+        middle_raw = ["│" + line.ljust(inner_width) + "│" for line in lines]
+        bottom_raw = "╰" + "─" * inner_width + "╯"
+        top = self._ansi(border_color, top_raw)
+        middle = [self._ansi(border_color, "│") + line.ljust(inner_width) + self._ansi(border_color, "│") for line in lines]
+        bottom = self._ansi(border_color, bottom_raw)
+        return "\n".join([top, *middle, bottom])
 
     def _chat_plain_text(self, speaker: str, body: str) -> str:
         return f"• {body}" if speaker == "You" else f"{speaker}: {body}"
@@ -655,6 +699,7 @@ class TitanTui(App[None]):
                 return
 
         self._write_chat_box("You", task, "cyan")
+        self.query_one("#output", SelectableRichLog).refresh()
         self.query_one("#assistant_line", Static).update("Titan: thinking.")
 
         self.ui.pending = True
@@ -684,7 +729,7 @@ class TitanTui(App[None]):
 
     def on_loop_event_msg(self, msg: LoopEventMsg) -> None:
         ev = msg.event
-        trace = self.query_one("#trace", RichLog)
+        trace = self.query_one("#trace", SelectableRichLog)
 
         if ev.type == "run_started":
             pass
@@ -853,7 +898,7 @@ class TitanTui(App[None]):
         )
 
     def on_loop_done_msg(self, msg: LoopDoneMsg) -> None:
-        outlog = self.query_one("#output", RichLog)
+        outlog = self.query_one("#output", SelectableRichLog)
         out = msg.outcome
 
         if out.text.strip():
@@ -933,6 +978,11 @@ class TitanTui(App[None]):
     def action_copy_chat(self) -> None:
         self._copy_to_clipboard("\n\n".join(self.chat_lines), "chat")
 
+    def action_cycle_theme(self) -> None:
+        self.theme_index = (self.theme_index + 1) % len(self.themes)
+        self._apply_responsive_layout(self.size.width)
+        self._write_trace(f"theme -> {self.themes[self.theme_index]['name']}")
+
     def _provider_has_key(self, provider: str) -> bool:
         if provider == "mock":
             return True
@@ -967,6 +1017,15 @@ class TitanTui(App[None]):
         update_config_key(resolve_config_path(), f"api_keys.{provider}", key)
         self.harness.provider = build_provider_from_config(self.harness.config)
 
+    def _provider_default_model(self, provider: str) -> str:
+        defaults = {
+            "openai": "gpt-5.4",
+            "openai-codex": "gpt-5.4",
+            "xai": "grok-3-mini",
+            "zai": "glm-5.1",
+        }
+        return defaults.get(provider, self.harness.config.model)
+
     def action_cycle_provider(self) -> None:
         if self.ui.pending:
             self._write_trace("provider switch blocked while run is active")
@@ -975,6 +1034,11 @@ class TitanTui(App[None]):
         next_provider = self.provider_options[(idx + 1) % len(self.provider_options)]
         self.harness.config.provider = next_provider
         self.cfg.provider = next_provider
+        default_model = self._provider_default_model(next_provider)
+        self.harness.config.model = default_model
+        self.cfg.model = default_model
+        update_config_key(resolve_config_path(), "provider", next_provider)
+        update_config_key(resolve_config_path(), "model", default_model)
         if self._provider_has_key(next_provider):
             self._hide_provider_key_prompt()
             self.harness.provider = build_provider_from_config(self.harness.config)
@@ -1017,6 +1081,8 @@ class TitanTui(App[None]):
             self.action_toggle_trace_verbosity()
         elif bid == "btn-provider":
             self.action_cycle_provider()
+        elif bid == "btn-theme":
+            self.action_cycle_theme()
         elif bid == "btn-quit":
             self.exit()
 

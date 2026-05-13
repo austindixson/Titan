@@ -111,6 +111,14 @@ def supported_openai_compat_providers() -> list[str]:
     return sorted(_OPENAI_COMPAT_PROVIDER_SPECS.keys())
 
 
+def provider_default_base_url(provider: str) -> str:
+    key = provider.strip().lower()
+    spec = _OPENAI_COMPAT_PROVIDER_SPECS.get(key)
+    if spec is None:
+        raise ValueError(f"unsupported provider '{provider}'. supported: {', '.join(supported_openai_compat_providers())}")
+    return spec["default_base_url"]
+
+
 def resolve_provider_credentials(provider: str, api_key_env: str | None = None, base_url: str | None = None) -> OpenAICredentials | None:
     key = provider.strip().lower()
     spec = _OPENAI_COMPAT_PROVIDER_SPECS.get(key)

@@ -9,7 +9,7 @@ from urllib import request, error
 
 from .types import AssistantResponse, Message, Role, ToolCall
 from typing import Any
-from .auth import resolve_provider_credentials
+from .auth import resolve_provider_credentials, provider_default_base_url
 from .config import RetryConfig, HarnessConfig
 from .image_paths import candidate_image_paths_from_text
 from .image_preprocess import preprocess_image_for_attachment
@@ -37,7 +37,10 @@ def build_provider_from_config(cfg: HarnessConfig) -> Provider:
 
         return MockProvider(script=make_tool_then_final_script())
 
-    if provider_name == "openai-codex":
+    config_key = (cfg.api_keys.get(provider_name, "") or "").strip()
+    if config_key:
+        creds = None
+    elif provider_name == "openai-codex":
         creds = resolve_provider_credentials(
             provider_name,
             api_key_env=cfg.oauth_token_env,
@@ -52,9 +55,15 @@ def build_provider_from_config(cfg: HarnessConfig) -> Provider:
     else:
         creds = resolve_provider_credentials(provider_name, base_url=cfg.api_base or None)
 
+    resolved_base = (
+        (creds.base_url if creds and creds.base_url else "")
+        or (cfg.api_base or "")
+        or provider_default_base_url(provider_name)
+    )
+
     return OpenAICompatProvider(
-        api_base=(creds.base_url if creds and creds.base_url else cfg.api_base),
-        api_key=(creds.token if creds else (cfg.api_keys.get(provider_name, "") or cfg.api_key())),
+        api_base=resolved_base,
+        api_key=(config_key or (creds.token if creds else cfg.api_key())),
     )
 
 

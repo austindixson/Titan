@@ -1,7 +1,8 @@
 import json
 from urllib import error
 
-from titan.provider import OpenAICompatProvider, ProviderError
+from titan.provider import OpenAICompatProvider, ProviderError, build_provider_from_config
+from titan.config import HarnessConfig
 from titan.types import Message, Role
 
 
@@ -228,3 +229,19 @@ def test_chat_completions_payload_bridges_read_file_image_descriptor_to_image_ur
     last_content = bridged_items[-1]["content"]
     assert last_content[1]["type"] == "image_url"
     assert last_content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_build_provider_from_config_uses_provider_default_base_when_key_saved_in_config():
+    cfg = HarnessConfig(provider="xai", model="grok-2", api_base="", api_keys={"xai": "xai-test-key"})
+    provider = build_provider_from_config(cfg)
+    assert isinstance(provider, OpenAICompatProvider)
+    assert provider.api_base == "https://api.x.ai/v1"
+    assert provider.api_key == "xai-test-key"
+
+
+def test_build_provider_from_config_prefers_saved_provider_key_over_env(monkeypatch):
+    monkeypatch.setenv("XAI_API_KEY", "xai-env-key")
+    cfg = HarnessConfig(provider="xai", model="grok-2", api_base="", api_keys={"xai": "xai-saved-key"})
+    provider = build_provider_from_config(cfg)
+    assert isinstance(provider, OpenAICompatProvider)
+    assert provider.api_key == "xai-saved-key"
