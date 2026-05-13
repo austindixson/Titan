@@ -4,72 +4,48 @@ Resilient local-first TUI agent harness with checkpointing and replay.
 
 ## Installation
 
-1) Install Python 3.10+
 ```bash
-python3 --version
-```
-
-
-2) Clone and enter the repo
-```bash
-git clone <repo-url>
-cd <repo-name>
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -e .
 ```
 
 ## Quick Start
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt  # or pip install -e .
+titan
 ```
 
 ## Usage Examples
 
-- Run locally
+- Run from source (dev loop)
 ```bash
-python -m <module_or_script>
+python -m src.titan.cli
 ```
 
 - Run tests
 ```bash
-pytest
+python -m pytest -q
 ```
 
-- Launch TUI binary after build
+- Run CI-equivalent checks locally
 ```bash
-./target/release/titan
+python -m pytest -q tests
 ```
 
 ## Implementation Overview
 
-This repository is implemented primarily in **Python** and organized around explicit runtime entrypoints plus supporting modules.
-
-### Key Directories
-
-- `.github/`
-- `Research/`
-- `docs/`
-- `scripts/`
-- `src/`
-- `tests/`
-
-### Key Files
-
-- `pyproject.toml`
-- `README.md`
-- `LICENSE`
-- `.github/workflows/ci.yml`
-
-### Entrypoints
-
+- `src/` contains the runtime loop, command routing, and terminal UI state transitions.
+- `scripts/` contains utility tooling used for development and reproducibility.
+- `tests/` contains behavior checks for checkpoint/replay and core chat loop reliability.
+- `pyproject.toml` defines package metadata and runtime dependencies.
 
 ## Troubleshooting
 
-- If startup fails, run the primary command with verbose flags and capture stderr logs.
-- If dependencies conflict, remove lock artifacts and reinstall in a clean shell.
-- If tests fail intermittently, run a single test target first, then full suite.
-- Ensure environment variables are loaded before running build/train commands.
+- If `titan` is not found after install, run `python -m pip install -e .` again inside the active venv.
+- If rendering looks broken in terminal, verify truecolor + UTF-8 locale and resize the terminal pane.
+- If a run becomes inconsistent, clear local state/checkpoints and rerun from a clean session.
 
 ## Visual Overview
 
