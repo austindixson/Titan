@@ -1,115 +1,138 @@
-# AI Chat
+# Titan
 
-Resilient local-first TUI agent harness with checkpointing and replay.
+Resilient local-first TUI agent harness with checkpoint/replay and provider switching.
 
-## Presentation Framework (Proven README Pattern)
+## One-command install
 
-### TL;DR
-Resilient local-first TUI agent harness with checkpoint/replay and terminal-native execution.
+macOS / Linux:
+```bash
+curl -fsSL https://raw.githubusercontent.com/austindixson/Titan/main/scripts/install.sh | bash
+```
 
-### Why this project
-- Solves a concrete workflow problem with reproducible command paths.
-- Prioritizes operator reliability over demo-only output.
-- Structured for practical use, not just conceptual documentation.
+Windows PowerShell:
+```powershell
+irm https://raw.githubusercontent.com/austindixson/Titan/main/scripts/install.ps1 | iex
+```
 
-### Quick Start
+## First 60 seconds after download
+
+If you already cloned Titan, run:
+```bash
+./scripts/install.sh
+```
+
+Then verify + launch:
+```bash
+titan doctor
+titan config show
+titan
+```
+
+## What users should expect in the interface
+
+When Titan opens, you will see:
+- top pane: Trace / Diff tabs
+- main pane: chat output
+- control row buttons: Stop, Provider, Clear, Trace, Quit
+- composer at bottom: "Type task and press Enter"
+
+Provider UX:
+- click `Provider: <current>` or press `Ctrl+P` to cycle providers
+- if the next provider has no key, Titan opens a hidden key input
+- paste key, press Enter, Titan saves it to `~/.titan/config.json` (redacted in `titan config show`)
+
+## Provider setup (real examples)
+
+OpenAI Codex OAuth:
+```bash
+export OPENAI_OAUTH_TOKEN="..."
+titan config set provider openai-codex
+titan config set model gpt-5.4
+titan
+```
+
+OpenAI API key:
+```bash
+export OPENAI_API_KEY="..."
+titan config set provider openai
+titan config set model gpt-5.4-mini
+titan
+```
+
+xAI (Grok-compatible OpenAI API):
+```bash
+export XAI_API_KEY="..."
+titan config set provider xai
+titan config set model grok-4
+titan
+```
+
+## Supported providers (built-in)
+
+- openai
+- openai-codex
+- openrouter
+- xai
+- groq
+- cerebras
+- deepseek
+- mistral
+- zai
+- moonshotai
+
+## How to try it quickly (real flow)
+
+1) Start Titan:
 ```bash
 titan
 ```
 
-### Installation
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip
-python -m pip install -e .
+2) Ask a concrete prompt:
+```text
+Summarize this repository and propose 3 improvements.
 ```
 
-### Usage Examples
+3) Switch provider live (`Ctrl+P`) and ask the same prompt again.
+
+4) Compare behavior in Trace tab (request/tool/retry flow).
+
+## Troubleshooting users will actually hit
+
+`titan: command not found`
 ```bash
-titan
-python -m pytest -q
+export PATH="$HOME/.local/bin:$PATH"
+source ~/.zshrc  # or ~/.bashrc
 ```
 
-### Architecture at a glance
-- src/ — runtime loop + command routing
-- tests/ — behavioral correctness checks
-- scripts/ — developer utilities and reproducibility tooling
+Provider key not detected
+- ensure env var name matches provider
+- or use in-app hidden prompt when switching provider
 
-### Troubleshooting
-- If `titan` command is missing, reinstall editable package inside active venv.
-- If terminal rendering glitches, verify UTF-8 locale and truecolor support.
-
-### Project status
-Active development; prioritize reliability and deterministic replay behavior.
-
-
-## Installation
-
+Provider/model mismatch error
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip
-python -m pip install -e .
+titan config set provider openai
+titan config set model gpt-5.4-mini
 ```
 
-## Quick Start
+UI rendering looks broken
+- use a terminal with UTF-8 + truecolor
+- widen terminal window and relaunch
 
-```bash
-titan
-```
+## Architecture at a glance
 
-## Usage Examples
-
-- Run from source (dev loop)
-```bash
-python -m src.titan.cli
-```
-
-- Run tests
-```bash
-python -m pytest -q
-```
-
-- Run CI-equivalent checks locally
-```bash
-python -m pytest -q tests
-```
-
-## Implementation Overview
-
-- `src/` contains the runtime loop, command routing, and terminal UI state transitions.
-- `scripts/` contains utility tooling used for development and reproducibility.
-- `tests/` contains behavior checks for checkpoint/replay and core chat loop reliability.
-- `pyproject.toml` defines package metadata and runtime dependencies.
-
-## Troubleshooting
-
-- If `titan` is not found after install, run `python -m pip install -e .` again inside the active venv.
-- If rendering looks broken in terminal, verify truecolor + UTF-8 locale and resize the terminal pane.
-- If a run becomes inconsistent, clear local state/checkpoints and rerun from a clean session.
+- `src/titan/titan_tui.py` — full-screen TUI, provider cycling, hidden API-key prompt
+- `src/titan/auth.py` — provider credential resolution (env, local auth files)
+- `src/titan/titan_cli.py` — `titan config ...`, `run`, `doctor`, and command routing
+- `tests/` — behavior and reliability checks
 
 ## Visual Overview
 
 ![Titan visual overview](docs/assets/visual-overview-titan.svg)
 
-
-## Problem
-Agent workflows need reliability and recoverability, not just one-shot outputs.
-
-## Reproducibility
-```bash
-python -m pip install -e .
-titan
-```
-
-## Limits
-Behavior depends on model/provider and local runtime constraints.
-
 ## Contributing
 
-Contributions are welcome. Open an issue first for significant changes, then submit a focused PR with reproducible validation steps.
+Open an issue first for significant changes, then submit a focused PR with reproducible validation steps.
 
 ## License
 
-See `LICENSE` for terms.
+See `LICENSE`.
