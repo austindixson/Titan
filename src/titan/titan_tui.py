@@ -6,6 +6,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib import request, error
 from urllib.parse import unquote, urlparse
 
 from rich import box
@@ -18,8 +19,8 @@ from textual.css.query import NoMatches
 from textual.message import Message as TextualMessage
 from textual.widgets import Button, Footer, Header, Input, RichLog, Static, TextArea
 
-from .auth import resolve_provider_credentials, supported_openai_compat_providers
-from .config import load_harness_config, resolve_config_path, update_config_key
+from .auth import resolve_provider_credentials, supported_openai_compat_providers, provider_default_base_url
+from .config import load_harness_config, resolve_config_path, update_config_key, unset_config_key
 from .titan import TitanHarness
 from .loop import AgentEvent
 from .provider import build_provider_from_config
@@ -341,6 +342,7 @@ class TitanTui(App[None]):
         with Horizontal(id="controls"):
             yield Button("Stop", id="btn-stop")
             yield Button(f"Provider: {self.cfg.provider}", id="btn-provider")
+            yield Button("New key", id="btn-new-key")
             yield Button("Theme: ocean", id="btn-theme")
             yield Button("Clear", id="btn-clear")
             yield Button(f"Trace: {self._chat_trace_mode()}", id="btn-trace")
@@ -365,6 +367,7 @@ class TitanTui(App[None]):
         self._set_top_tab("trace")
         self.query_one("#api_key_prompt", Static).display = False
         self.query_one("#api_key_input", Input).display = False
+        self.query_one("#btn-new-key", Button).display = False
         self.query_one("#input", ComposerTextArea).focus()
         self._apply_responsive_layout(self.size.width)
         self._refresh_status()
@@ -388,6 +391,7 @@ class TitanTui(App[None]):
 
         provider = self.harness.config.provider
         self.query_one("#btn-provider", Button).label = f"Provider: {provider}"
+        self.query_one("#btn-new-key", Button).label = "New key"
         self.query_one("#btn-theme", Button).label = f"Theme: {self.themes[self.theme_index]['name']}"
         self._refresh_top_tab_labels()
 
@@ -1004,12 +1008,51 @@ class TitanTui(App[None]):
         key_input.focus()
         self._write_trace(f"provider {provider} needs a saved API key")
 
+    def _show_new_key_button_temporarily(self) -> None:
+        btn = self.query_one("#btn-new-key", Button)
+        btn.display = True
+
+        def _hide() -> None:
+            try:
+                self.query_one("#btn-new-key", Button).display = False
+            except NoMatches:
+                return
+
+        self.set_timer(6.0, _hide)
+
+    def _validate_provider_key(self, provider: str, key: str) -> tuple[bool, str]:
+        try:
+            base = provider_default_base_url(provider).rstrip("/")
+        except Exception as exc:
+            return False, f"unknown provider: {exc}"
+
+        req = request.Request(
+            f"{base}/models",
+            headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+            method="GET",
+        )
+        try:
+            with request.urlopen(req, timeout=8) as resp:
+                if getattr(resp, "status", 200) >= 400:
+                    return False, f"http {getattr(resp, 'status', 'error')}"
+                return True, "ok"
+        except error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode(errors="ignore")
+            except Exception:
+                pass
+            return False, f"http {e.code}: {body or e.reason}"
+        except Exception as e:
+            return False, str(e)
+
     def _hide_provider_key_prompt(self) -> None:
         self.pending_api_key_provider = None
         self.query_one("#api_key_prompt", Static).display = False
         key_input = self.query_one("#api_key_input", Input)
         key_input.value = ""
         key_input.display = False
+        self.query_one("#btn-new-key", Button).display = False
 
     def _save_provider_key(self, provider: str, key: str) -> None:
         self.harness.config.api_keys[provider] = key
@@ -1039,8 +1082,8 @@ class TitanTui(App[None]):
         self.cfg.model = default_model
         update_config_key(resolve_config_path(), "provider", next_provider)
         update_config_key(resolve_config_path(), "model", default_model)
+        self._show_new_key_button_temporarily()
         if self._provider_has_key(next_provider):
-            self._hide_provider_key_prompt()
             self.harness.provider = build_provider_from_config(self.harness.config)
         else:
             self._prompt_for_provider_key(next_provider)
@@ -1057,8 +1100,19 @@ class TitanTui(App[None]):
             self._write_trace(f"provider {provider} key not saved: empty input")
             return
         self._save_provider_key(provider, key)
+        valid, detail = self._validate_provider_key(provider, key)
+        if not valid:
+            self.harness.config.api_keys.pop(provider, None)
+            self.cfg.api_keys.pop(provider, None)
+            unset_config_key(resolve_config_path(), f"api_keys.{provider}")
+            self._prompt_for_provider_key(provider)
+            self.query_one("#api_key_prompt", Static).update(
+                f"Invalid key for {provider}; key reset. Paste a new key and press Enter. ({self._compact(detail, 120)})"
+            )
+            self._write_trace(f"provider {provider} key invalid; reset saved key")
+            return
         self._hide_provider_key_prompt()
-        self._write_trace(f"saved API key for {provider}")
+        self._write_trace(f"saved valid API key for {provider}")
         self.query_one("#input", ComposerTextArea).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -1081,6 +1135,8 @@ class TitanTui(App[None]):
             self.action_toggle_trace_verbosity()
         elif bid == "btn-provider":
             self.action_cycle_provider()
+        elif bid == "btn-new-key":
+            self._prompt_for_provider_key(self.harness.config.provider)
         elif bid == "btn-theme":
             self.action_cycle_theme()
         elif bid == "btn-quit":

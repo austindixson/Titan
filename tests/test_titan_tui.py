@@ -33,6 +33,7 @@ def test_tui_controls_are_limited_to_stop_provider_operator_trace_quit(monkeypat
                 "tab-diff": "Diff",
                 "btn-stop": "Stop",
                 "btn-provider": "Provider: openai",
+                "btn-new-key": "New key",
                 "btn-theme": "Theme: ocean",
                 "btn-clear": "Clear",
                 "btn-trace": "Trace: normal",
@@ -580,6 +581,7 @@ def test_tui_provider_selection_prompts_and_saves_missing_api_key(monkeypatch):
     saved = []
     monkeypatch.setattr("titan.titan_tui.resolve_provider_credentials", lambda *args, **kwargs: None)
     monkeypatch.setattr("titan.titan_tui.update_config_key", lambda path, key, value: saved.append((key, value)))
+    monkeypatch.setattr(TitanTui, "_validate_provider_key", lambda self, provider, key: (True, "ok"))
 
     async def _run():
         app = TitanTui()
@@ -615,6 +617,46 @@ def test_tui_provider_cycle_sets_zai_default_model(monkeypatch):
             app.action_cycle_provider()
             assert app.harness.config.provider == "zai"
             assert app.harness.config.model == "glm-5.1"
+
+    asyncio.run(_run())
+
+
+def test_tui_invalid_provider_key_is_reset(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+    saved = []
+    removed = []
+    monkeypatch.setattr("titan.titan_tui.resolve_provider_credentials", lambda *args, **kwargs: None)
+    monkeypatch.setattr("titan.titan_tui.update_config_key", lambda path, key, value: saved.append((key, value)))
+    monkeypatch.setattr("titan.titan_tui.unset_config_key", lambda path, key: removed.append(key) or True)
+    monkeypatch.setattr(TitanTui, "_validate_provider_key", lambda self, provider, key: (False, "http 401"))
+
+    async def _run():
+        app = TitanTui()
+        app.provider_options = ["openai", "xai"]
+        async with app.run_test(size=(100, 32)):
+            app.action_cycle_provider()
+            key_input = app.query_one("#api_key_input", Input)
+            key_input.value = "bad-key"
+            app.on_input_submitted(Input.Submitted(key_input, key_input.value))
+            assert app.pending_api_key_provider == "xai"
+            assert key_input.display is True
+            assert app.harness.config.api_keys.get("xai") is None
+            assert "api_keys.xai" in removed
+
+    asyncio.run(_run())
+
+
+def test_tui_provider_button_shows_new_key_temporarily(monkeypatch):
+    _patch_tui_deps(monkeypatch)
+
+    async def _run():
+        app = TitanTui()
+        app.provider_options = ["openai", "xai"]
+        async with app.run_test(size=(100, 32)):
+            btn = app.query_one("#btn-new-key", Button)
+            assert btn.display is False
+            app.action_cycle_provider()
+            assert btn.display is True
 
     asyncio.run(_run())
 
