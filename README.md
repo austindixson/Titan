@@ -2,6 +2,48 @@
 
 Resilient local-first TUI agent harness with checkpointing and replay.
 
+## Presentation Framework (Proven README Pattern)
+
+### TL;DR
+Resilient local-first TUI agent harness with checkpoint/replay and terminal-native execution.
+
+### Why this project
+- Solves a concrete workflow problem with reproducible command paths.
+- Prioritizes operator reliability over demo-only output.
+- Structured for practical use, not just conceptual documentation.
+
+### Quick Start
+```bash
+titan
+```
+
+### Installation
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -e .
+```
+
+### Usage Examples
+```bash
+titan
+python -m pytest -q
+```
+
+### Architecture at a glance
+- src/ — runtime loop + command routing
+- tests/ — behavioral correctness checks
+- scripts/ — developer utilities and reproducibility tooling
+
+### Troubleshooting
+- If `titan` command is missing, reinstall editable package inside active venv.
+- If terminal rendering glitches, verify UTF-8 locale and truecolor support.
+
+### Project status
+Active development; prioritize reliability and deterministic replay behavior.
+
+
 ## Installation
 
 ```bash
@@ -63,3 +105,11 @@ titan
 
 ## Limits
 Behavior depends on model/provider and local runtime constraints.
+
+## Contributing
+
+Contributions are welcome. Open an issue first for significant changes, then submit a focused PR with reproducible validation steps.
+
+## License
+
+See `LICENSE` for terms.
