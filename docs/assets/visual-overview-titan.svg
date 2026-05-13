@@ -1,16 +1,16 @@
 <svg width="1600" height="900" viewBox="0 0 1600 900" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Titan visual overview">
 <defs>
   <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="900" gradientUnits="userSpaceOnUse">
-    <stop stop-color="#0B0E14"/><stop offset="1" stop-color="#111827"/>
+    <stop stop-color="#0B1220"/><stop offset="1" stop-color="#111827"/>
   </linearGradient>
   <linearGradient id="line" x1="120" y1="140" x2="1480" y2="760" gradientUnits="userSpaceOnUse">
-    <stop stop-color="#6EE7FF"/><stop offset="1" stop-color="#A78BFA"/>
+    <stop stop-color="#67E8F9"/><stop offset="1" stop-color="#A78BFA"/>
   </linearGradient>
 </defs>
 <rect width="1600" height="900" fill="url(#bg)"/>
 <rect x="72" y="72" width="1456" height="756" rx="28" fill="#0B1220" stroke="#334155"/>
 <rect x="120" y="150" width="1360" height="2" fill="url(#line)"/>
-<text x="120" y="130" fill="#E5E7EB" font-size="62" font-family="Inter, Segoe UI, Arial" font-weight="700">AI Chat</text>
+<text x="120" y="130" fill="#E5E7EB" font-size="62" font-family="Inter, Segoe UI, Arial" font-weight="700">Titan</text>
 <text x="120" y="210" fill="#94A3B8" font-size="28" font-family="Inter, Segoe UI, Arial">Visual Overview</text>
 <rect x="120" y="250" width="420" height="460" rx="18" fill="#111827" stroke="#1F2937"/>
 <rect x="590" y="250" width="420" height="460" rx="18" fill="#111827" stroke="#1F2937"/>
@@ -18,16 +18,17 @@
 <text x="150" y="300" fill="#CBD5E1" font-size="24" font-family="Inter, Segoe UI, Arial" font-weight="600">Architecture</text>
 <text x="620" y="300" fill="#CBD5E1" font-size="24" font-family="Inter, Segoe UI, Arial" font-weight="600">Workflow</text>
 <text x="1090" y="300" fill="#CBD5E1" font-size="24" font-family="Inter, Segoe UI, Arial" font-weight="600">Operator Notes</text>
-<text x="150" y="350" fill="#93C5FD" font-size="23" font-family="JetBrains Mono, Menlo, monospace">• Stack: Python</text>
-<text x="150" y="395" fill="#93C5FD" font-size="23" font-family="JetBrains Mono, Menlo, monospace">• Entrypoints: See source tree</text>
-<text x="150" y="440" fill="#93C5FD" font-size="23" font-family="JetBrains Mono, Menlo, monospace">• Core dirs: .github, Research, docs, scripts</text>
+<text x="150" y="350" fill="#93C5FD" font-size="20" font-family="JetBrains Mono, Menlo, monospace">• Stack: Python</text>
+<text x="150" y="388" fill="#93C5FD" font-size="20" font-family="JetBrains Mono, Menlo, monospace">• Entrypoints: see src/</text>
+<text x="150" y="426" fill="#93C5FD" font-size="20" font-family="JetBrains Mono, Menlo, monospace">• Core dirs: .github, Research,</text>
+<text x="150" y="464" fill="#93C5FD" font-size="20" font-family="JetBrains Mono, Menlo, monospace">• docs, scripts, src</text>
 <text x="620" y="350" fill="#A7F3D0" font-size="22" font-family="Inter, Segoe UI, Arial">1. Install dependencies</text>
-<text x="620" y="390" fill="#A7F3D0" font-size="22" font-family="Inter, Segoe UI, Arial">2. Configure local environment</text>
-<text x="620" y="430" fill="#A7F3D0" font-size="22" font-family="Inter, Segoe UI, Arial">3. Run + validate primary flow</text>
-<text x="620" y="470" fill="#A7F3D0" font-size="22" font-family="Inter, Segoe UI, Arial">4. Execute test and release checks</text>
-<text x="1090" y="350" fill="#FDE68A" font-size="22" font-family="Inter, Segoe UI, Arial">- Keep deps pinned for reproducibility</text>
-<text x="1090" y="390" fill="#FDE68A" font-size="22" font-family="Inter, Segoe UI, Arial">- Validate on clean shell/session</text>
-<text x="1090" y="430" fill="#FDE68A" font-size="22" font-family="Inter, Segoe UI, Arial">- Capture logs for failed runs</text>
-<text x="1090" y="470" fill="#FDE68A" font-size="22" font-family="Inter, Segoe UI, Arial">- Update docs with exact commands</text>
-<text x="120" y="780" fill="#64748B" font-size="20" font-family="Inter, Segoe UI, Arial">Generated bespoke for Titan • static SVG • 1600×900</text>
+<text x="620" y="398" fill="#A7F3D0" font-size="22" font-family="Inter, Segoe UI, Arial">2. Configure local environment</text>
+<text x="620" y="446" fill="#A7F3D0" font-size="22" font-family="Inter, Segoe UI, Arial">3. Run and validate primary flow</text>
+<text x="620" y="494" fill="#A7F3D0" font-size="22" font-family="Inter, Segoe UI, Arial">4. Execute tests and release checks</text>
+<text x="1090" y="350" fill="#FDE68A" font-size="22" font-family="Inter, Segoe UI, Arial">- Keep dependencies pinned</text>
+<text x="1090" y="398" fill="#FDE68A" font-size="22" font-family="Inter, Segoe UI, Arial">- Validate from a clean shell</text>
+<text x="1090" y="446" fill="#FDE68A" font-size="22" font-family="Inter, Segoe UI, Arial">- Capture logs for failed runs</text>
+<text x="1090" y="494" fill="#FDE68A" font-size="22" font-family="Inter, Segoe UI, Arial">- Document exact working commands</text>
+<text x="120" y="780" fill="#64748B" font-size="20" font-family="Inter, Segoe UI, Arial">Titan • Visual Overview • 1600×900</text>
 </svg>
