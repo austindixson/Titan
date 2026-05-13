@@ -2,7 +2,7 @@ import asyncio
 
 from rich.panel import Panel
 from rich.text import Text
-from textual.widgets import Button, Input, TextArea
+from textual.widgets import Button, Input, Select, TextArea
 
 from titan.config import HarnessConfig
 from titan.mock_provider import MockProvider
@@ -41,6 +41,14 @@ def test_tui_controls_are_limited_to_stop_provider_operator_trace_quit(monkeypat
             }
 
     asyncio.run(_run())
+
+
+def test_tui_provider_options_are_sanitized(monkeypatch):
+    monkeypatch.setattr("titan.titan_tui.load_harness_config", lambda: HarnessConfig(provider="openai", model="mock"))
+    monkeypatch.setattr("titan.titan_tui.build_provider_from_config", lambda cfg: MockProvider(script=[]))
+    monkeypatch.setattr("titan.titan_tui.supported_openai_compat_providers", lambda: ["", "xai", " xai ", "zai", "  ", "openai"])
+    app = TitanTui()
+    assert app.provider_options == ["openai", "xai", "zai"]
 
 
 def test_tui_trace_defaults_normal_and_small(monkeypatch):
@@ -646,17 +654,24 @@ def test_tui_invalid_provider_key_is_reset(monkeypatch):
     asyncio.run(_run())
 
 
-def test_tui_provider_button_shows_new_key_temporarily(monkeypatch):
+def test_tui_provider_button_opens_menu_and_shows_new_key(monkeypatch):
     _patch_tui_deps(monkeypatch)
 
     async def _run():
         app = TitanTui()
-        app.provider_options = ["openai", "xai"]
-        async with app.run_test(size=(100, 32)):
+        app.provider_options = ["openai", "xai", "zai"]
+        async with app.run_test(size=(100, 32)) as pilot:
             btn = app.query_one("#btn-new-key", Button)
-            assert btn.display is False
-            app.action_cycle_provider()
-            assert btn.display is True
+            sel = app.query_one("#provider_select", Select)
+            assert sel.display is False
+            await pilot.click("#btn-provider")
+            await pilot.pause()
+            assert sel.display is True
+            # Select xai from menu
+            sel.value = "xai"
+            await pilot.pause()
+            assert app.harness.config.provider == "xai"
+            assert str(btn.styles.display) != "none"
 
     asyncio.run(_run())
 

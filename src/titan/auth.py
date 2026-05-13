@@ -57,7 +57,7 @@ _OPENAI_COMPAT_PROVIDER_SPECS: dict[str, dict[str, str]] = {
     "zai": {
         "api_key_env": "ZAI_API_KEY",
         "base_url_env": "ZAI_BASE_URL",
-        "default_base_url": "https://api.z.ai/api/paas/v4",
+        "default_base_url": "https://api.z.ai/api/coding/paas/v4",
     },
     "moonshotai": {
         "api_key_env": "MOONSHOT_API_KEY",

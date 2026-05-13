@@ -17,7 +17,7 @@ from textual.containers import Container, Horizontal
 from textual import events
 from textual.css.query import NoMatches
 from textual.message import Message as TextualMessage
-from textual.widgets import Button, Footer, Header, Input, RichLog, Static, TextArea
+from textual.widgets import Button, Footer, Header, Input, RichLog, Select, Static, TextArea
 
 from .auth import resolve_provider_credentials, supported_openai_compat_providers, provider_default_base_url
 from .config import load_harness_config, resolve_config_path, update_config_key, unset_config_key
@@ -283,6 +283,7 @@ class TitanTui(App[None]):
         border: solid #3a3a3a;
     }
     #api_key_prompt { height: 1; padding: 0 1; color: #fbbc04; }
+    #provider_select { height: 3; border: solid #5f6368; }
     #api_key_input { height: 3; border: solid #5f6368; }
     #status_line {
         height: 1;
@@ -300,9 +301,11 @@ class TitanTui(App[None]):
     def __init__(self) -> None:
         super().__init__()
         self.cfg = load_harness_config()
-        self.provider_options = supported_openai_compat_providers()
-        if self.cfg.provider not in self.provider_options:
-            self.provider_options.insert(0, self.cfg.provider)
+        self.provider_options = [
+            p for p in sorted({str(x).strip().lower() for x in supported_openai_compat_providers()}) if p
+        ]
+        if str(self.cfg.provider).strip().lower() not in self.provider_options:
+            self.provider_options.insert(0, str(self.cfg.provider).strip().lower())
         provider = build_provider_from_config(self.cfg)
         self.harness = TitanHarness(provider=provider, tools=default_registry(), config=self.cfg, session_store=SessionStore(".titan/session.jsonl"))
         self.history = [Message(role=Role.SYSTEM, content="You are Titan.")]
@@ -357,6 +360,7 @@ class TitanTui(App[None]):
             placeholder="Type task and press Enter",
         )
         yield Static("", id="api_key_prompt")
+        yield Select([(p, p) for p in self.provider_options], id="provider_select", allow_blank=False, value=self.harness.config.provider)
         yield Input("", id="api_key_input", password=True, placeholder="Paste API key and press Enter")
         yield Static("", id="status_line")
         yield Footer()
@@ -366,8 +370,9 @@ class TitanTui(App[None]):
         self._refresh_diff_tab()
         self._set_top_tab("trace")
         self.query_one("#api_key_prompt", Static).display = False
+        self.query_one("#provider_select", Select).display = False
         self.query_one("#api_key_input", Input).display = False
-        self.query_one("#btn-new-key", Button).display = False
+        self.query_one("#btn-new-key", Button).styles.display = "none"
         self.query_one("#input", ComposerTextArea).focus()
         self._apply_responsive_layout(self.size.width)
         self._refresh_status()
@@ -575,34 +580,17 @@ class TitanTui(App[None]):
             return str(theme["titan"])
         return requested
 
-    def _ansi(self, color: str, text: str) -> str:
-        codes = {
-            "red": "31",
-            "green": "32",
-            "yellow": "33",
-            "blue": "34",
-            "magenta": "35",
-            "cyan": "36",
-            "white": "37",
-        }
-        code = codes.get(color)
-        if not code:
-            return text
-        return f"\x1b[{code}m{text}\x1b[0m"
-
     def _chat_renderable(self, speaker: str, body: str, border_style: str):
         if speaker == "You":
             return Text(f"• {body}", style="bold")
-        border_color = self._theme_color_for_speaker(speaker, border_style)
+        # IMPORTANT: keep output plain-text safe for TextArea rendering.
+        # ANSI color escapes in TextArea caused border corruption with long/wrapped content.
         lines = body.splitlines() or [""]
         title = f" {speaker} "
         inner_width = max(len(title), *(len(line) for line in lines))
-        top_raw = "╭" + title + "─" * (inner_width - len(title)) + "╮"
-        middle_raw = ["│" + line.ljust(inner_width) + "│" for line in lines]
-        bottom_raw = "╰" + "─" * inner_width + "╯"
-        top = self._ansi(border_color, top_raw)
-        middle = [self._ansi(border_color, "│") + line.ljust(inner_width) + self._ansi(border_color, "│") for line in lines]
-        bottom = self._ansi(border_color, bottom_raw)
+        top = "╭" + title + "─" * (inner_width - len(title)) + "╮"
+        middle = ["│" + line.ljust(inner_width) + "│" for line in lines]
+        bottom = "╰" + "─" * inner_width + "╯"
         return "\n".join([top, *middle, bottom])
 
     def _chat_plain_text(self, speaker: str, body: str) -> str:
@@ -1010,11 +998,11 @@ class TitanTui(App[None]):
 
     def _show_new_key_button_temporarily(self) -> None:
         btn = self.query_one("#btn-new-key", Button)
-        btn.display = True
+        btn.styles.display = "block"
 
         def _hide() -> None:
             try:
-                self.query_one("#btn-new-key", Button).display = False
+                self.query_one("#btn-new-key", Button).styles.display = "none"
             except NoMatches:
                 return
 
@@ -1052,7 +1040,7 @@ class TitanTui(App[None]):
         key_input = self.query_one("#api_key_input", Input)
         key_input.value = ""
         key_input.display = False
-        self.query_one("#btn-new-key", Button).display = False
+        self.query_one("#btn-new-key", Button).styles.display = "none"
 
     def _save_provider_key(self, provider: str, key: str) -> None:
         self.harness.config.api_keys[provider] = key
@@ -1069,12 +1057,10 @@ class TitanTui(App[None]):
         }
         return defaults.get(provider, self.harness.config.model)
 
-    def action_cycle_provider(self) -> None:
-        if self.ui.pending:
-            self._write_trace("provider switch blocked while run is active")
+    def _apply_provider_selection(self, next_provider: str) -> None:
+        next_provider = str(next_provider).strip().lower()
+        if not next_provider:
             return
-        idx = self.provider_options.index(self.harness.config.provider) if self.harness.config.provider in self.provider_options else 0
-        next_provider = self.provider_options[(idx + 1) % len(self.provider_options)]
         self.harness.config.provider = next_provider
         self.cfg.provider = next_provider
         default_model = self._provider_default_model(next_provider)
@@ -1087,9 +1073,28 @@ class TitanTui(App[None]):
             self.harness.provider = build_provider_from_config(self.harness.config)
         else:
             self._prompt_for_provider_key(next_provider)
+        self._hide_provider_menu()
         self._apply_responsive_layout(self.size.width)
         self._write_trace(f"provider -> {next_provider}")
         self._refresh_status()
+
+    def _show_provider_menu(self) -> None:
+        select = self.query_one("#provider_select", Select)
+        select.set_options([(p, p) for p in self.provider_options])
+        select.value = self.harness.config.provider
+        select.display = True
+        select.focus()
+
+    def _hide_provider_menu(self) -> None:
+        self.query_one("#provider_select", Select).display = False
+
+    def action_cycle_provider(self) -> None:
+        if self.ui.pending:
+            self._write_trace("provider switch blocked while run is active")
+            return
+        idx = self.provider_options.index(self.harness.config.provider) if self.harness.config.provider in self.provider_options else 0
+        next_provider = self.provider_options[(idx + 1) % len(self.provider_options)]
+        self._apply_provider_selection(next_provider)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "api_key_input" or not self.pending_api_key_provider:
@@ -1115,6 +1120,18 @@ class TitanTui(App[None]):
         self._write_trace(f"saved valid API key for {provider}")
         self.query_one("#input", ComposerTextArea).focus()
 
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "provider_select":
+            return
+        value = event.value
+        if value in (None, Select.BLANK):
+            return
+        if self.ui.pending:
+            self._hide_provider_menu()
+            self._write_trace("provider switch blocked while run is active")
+            return
+        self._apply_provider_selection(str(value))
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         if bid == "btn-stop":
@@ -1134,7 +1151,7 @@ class TitanTui(App[None]):
         elif bid == "btn-trace":
             self.action_toggle_trace_verbosity()
         elif bid == "btn-provider":
-            self.action_cycle_provider()
+            self._show_provider_menu()
         elif bid == "btn-new-key":
             self._prompt_for_provider_key(self.harness.config.provider)
         elif bid == "btn-theme":
