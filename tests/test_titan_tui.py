@@ -2,7 +2,7 @@ import asyncio
 
 from rich.panel import Panel
 from rich.text import Text
-from textual.widgets import Button, Input, Select, TextArea
+from textual.widgets import Button, Input, TextArea
 
 from titan.config import HarnessConfig
 from titan.mock_provider import MockProvider
@@ -27,6 +27,7 @@ def test_tui_controls_are_limited_to_stop_provider_operator_trace_quit(monkeypat
             labels = {
                 button.id: str(button.label)
                 for button in app.query(Button)
+                if button.id and not str(button.id).startswith("provider-opt-")
             }
             assert labels == {
                 "tab-trace": "Trace ●",
@@ -662,13 +663,14 @@ def test_tui_provider_button_opens_menu_and_shows_new_key(monkeypatch):
         app.provider_options = ["openai", "xai", "zai"]
         async with app.run_test(size=(100, 32)) as pilot:
             btn = app.query_one("#btn-new-key", Button)
-            sel = app.query_one("#provider_select", Select)
-            assert sel.display is False
+            menu = app.query_one("#provider_menu")
+            assert str(menu.styles.display) == "none"
             await pilot.click("#btn-provider")
             await pilot.pause()
-            assert sel.display is True
-            # Select xai from menu
-            sel.value = "xai"
+            await pilot.pause()
+            assert str(menu.styles.display) != "none"
+            assert app.harness.config.provider == "openai"
+            await pilot.click("#provider-opt-xai")
             await pilot.pause()
             assert app.harness.config.provider == "xai"
             assert str(btn.styles.display) != "none"

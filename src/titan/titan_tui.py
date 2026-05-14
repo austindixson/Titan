@@ -17,7 +17,7 @@ from textual.containers import Container, Horizontal
 from textual import events
 from textual.css.query import NoMatches
 from textual.message import Message as TextualMessage
-from textual.widgets import Button, Footer, Header, Input, RichLog, Select, Static, TextArea
+from textual.widgets import Button, Footer, Header, Input, RichLog, Static, TextArea
 
 from .auth import resolve_provider_credentials, supported_openai_compat_providers, provider_default_base_url
 from .config import load_harness_config, resolve_config_path, update_config_key, unset_config_key
@@ -283,7 +283,20 @@ class TitanTui(App[None]):
         border: solid #3a3a3a;
     }
     #api_key_prompt { height: 1; padding: 0 1; color: #fbbc04; }
-    #provider_select { height: 3; border: solid #5f6368; }
+    #provider_menu {
+        height: auto;
+        padding: 0 1;
+        border: solid #5f6368;
+        display: none;
+        layout: grid;
+        grid-size: 5;
+        grid-gutter: 0 1;
+    }
+    #provider_menu Button {
+        min-width: 8;
+        width: 1fr;
+        margin-bottom: 0;
+    }
     #api_key_input { height: 3; border: solid #5f6368; }
     #status_line {
         height: 1;
@@ -342,6 +355,9 @@ class TitanTui(App[None]):
             yield SelectableRichLog(id="trace", soft_wrap=True)
             yield SelectableRichLog(id="diff", soft_wrap=True)
         yield SelectableRichLog(id="output", soft_wrap=True)
+        with Container(id="provider_menu"):
+            for p in self.provider_options:
+                yield Button(p, id=f"provider-opt-{p}")
         with Horizontal(id="controls"):
             yield Button("Stop", id="btn-stop")
             yield Button(f"Provider: {self.cfg.provider}", id="btn-provider")
@@ -360,7 +376,6 @@ class TitanTui(App[None]):
             placeholder="Type task and press Enter",
         )
         yield Static("", id="api_key_prompt")
-        yield Select([(p, p) for p in self.provider_options], id="provider_select", allow_blank=False, value=self.harness.config.provider)
         yield Input("", id="api_key_input", password=True, placeholder="Paste API key and press Enter")
         yield Static("", id="status_line")
         yield Footer()
@@ -370,7 +385,7 @@ class TitanTui(App[None]):
         self._refresh_diff_tab()
         self._set_top_tab("trace")
         self.query_one("#api_key_prompt", Static).display = False
-        self.query_one("#provider_select", Select).display = False
+        self.query_one("#provider_menu", Container).styles.display = "none"
         self.query_one("#api_key_input", Input).display = False
         self.query_one("#btn-new-key", Button).styles.display = "none"
         self.query_one("#input", ComposerTextArea).focus()
@@ -583,15 +598,18 @@ class TitanTui(App[None]):
     def _chat_renderable(self, speaker: str, body: str, border_style: str):
         if speaker == "You":
             return Text(f"• {body}", style="bold")
-        # IMPORTANT: keep output plain-text safe for TextArea rendering.
-        # ANSI color escapes in TextArea caused border corruption with long/wrapped content.
+        # Use horizontal-only framing to avoid per-line border corruption when text wraps.
         lines = body.splitlines() or [""]
         title = f" {speaker} "
-        inner_width = max(len(title), *(len(line) for line in lines))
-        top = "╭" + title + "─" * (inner_width - len(title)) + "╮"
-        middle = ["│" + line.ljust(inner_width) + "│" for line in lines]
-        bottom = "╰" + "─" * inner_width + "╯"
-        return "\n".join([top, *middle, bottom])
+        try:
+            out = self.query_one("#output", SelectableRichLog)
+            width = max(40, int(out.size.width) - 2)
+        except Exception:
+            width = 80
+        top_fill = max(0, width - len(title) - 2)
+        top = "╭" + title + ("─" * top_fill)
+        bottom = "╰" + ("─" * max(12, width - 1))
+        return "\n".join([top, *lines, bottom])
 
     def _chat_plain_text(self, speaker: str, body: str) -> str:
         return f"• {body}" if speaker == "You" else f"{speaker}: {body}"
@@ -1079,14 +1097,15 @@ class TitanTui(App[None]):
         self._refresh_status()
 
     def _show_provider_menu(self) -> None:
-        select = self.query_one("#provider_select", Select)
-        select.set_options([(p, p) for p in self.provider_options])
-        select.value = self.harness.config.provider
-        select.display = True
-        select.focus()
+        menu = self.query_one("#provider_menu", Container)
+        menu.styles.display = "block"
+        self.query_one("#api_key_prompt", Static).update("Pick provider")
+        self.query_one("#api_key_prompt", Static).display = True
 
     def _hide_provider_menu(self) -> None:
-        self.query_one("#provider_select", Select).display = False
+        self.query_one("#provider_menu", Container).styles.display = "none"
+        if self.pending_api_key_provider is None:
+            self.query_one("#api_key_prompt", Static).display = False
 
     def action_cycle_provider(self) -> None:
         if self.ui.pending:
@@ -1120,20 +1139,13 @@ class TitanTui(App[None]):
         self._write_trace(f"saved valid API key for {provider}")
         self.query_one("#input", ComposerTextArea).focus()
 
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id != "provider_select":
-            return
-        value = event.value
-        if value in (None, Select.BLANK):
-            return
-        if self.ui.pending:
-            self._hide_provider_menu()
-            self._write_trace("provider switch blocked while run is active")
-            return
-        self._apply_provider_selection(str(value))
-
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
+        if not bid:
+            return
+        if bid.startswith("provider-opt-"):
+            self._apply_provider_selection(bid.removeprefix("provider-opt-"))
+            return
         if bid == "btn-stop":
             self.action_stop()
         elif bid == "tab-trace":
