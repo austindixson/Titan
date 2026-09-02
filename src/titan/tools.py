@@ -218,6 +218,28 @@ def write_file_tool(args: dict) -> str:
     return f"wrote {path}"
 
 
+_SHELL_DENY_SUBSTRINGS = (
+    "rm -rf /",
+    "rm -rf /*",
+    "rm -fr /",
+    "rm -fr /*",
+    "mkfs.",
+    "dd if=/dev/zero",
+    ":(){ :|:& };:",
+)
+
+
+def blocked_shell_reason(command: str) -> str | None:
+    """Return a denylist reason, or None if the command may run."""
+    normalized = " ".join((command or "").split()).lower()
+    if not normalized:
+        return None
+    for item in _SHELL_DENY_SUBSTRINGS:
+        if item in normalized:
+            return f"blocked by denylist: {item}"
+    return None
+
+
 def shell_tool(args: dict) -> str:
     raise RuntimeError("shell tool must be bound through registry for cwd-aware execution")
 
@@ -227,6 +249,9 @@ def make_shell_tool(reg: ToolRegistry):
         cmd = args["command"]
         timeout = int(args.get("timeout", 120))
         stripped = cmd.strip()
+        blocked = blocked_shell_reason(cmd)
+        if blocked:
+            raise RuntimeError(blocked)
 
         if stripped == "pwd":
             return json.dumps({"exit_code": 0, "cwd": str(reg.cwd), "stdout": str(reg.cwd), "stderr": ""})

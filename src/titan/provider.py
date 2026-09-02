@@ -169,14 +169,42 @@ class OpenAICompatProvider(Provider):
             content.append({"type": "image_url", "image_url": {"url": self._image_data_url(image)}})
         return content
 
+    def _assistant_tool_calls_payload(self, message: Message) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for tc in message.tool_calls:
+            rows.append(
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments or {}),
+                    },
+                }
+            )
+        return rows
+
+    def _chat_message_payload(self, message: Message) -> dict[str, Any]:
+        row: dict[str, Any] = {"role": message.role.value, "content": self._chat_content_for_message(message)}
+        if message.role == Role.ASSISTANT and message.tool_calls:
+            row["tool_calls"] = self._assistant_tool_calls_payload(message)
+            if not str(message.content or "").strip():
+                row["content"] = None
+        if message.role == Role.TOOL:
+            if message.tool_call_id:
+                row["tool_call_id"] = message.tool_call_id
+            if message.tool_name:
+                row["name"] = message.tool_name
+        return row
+
     def _chat_messages_payload(self, messages: list[Message]) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []
         for m in messages:
-            payload.append({"role": m.role.value, "content": self._chat_content_for_message(m)})
+            payload.append(self._chat_message_payload(m))
             tool_image = self._tool_image_path_from_descriptor(m)
             if tool_image is not None:
                 bridge = self._tool_image_bridge_user_message(tool_image)
-                payload.append({"role": bridge.role.value, "content": self._chat_content_for_message(bridge)})
+                payload.append(self._chat_message_payload(bridge))
         return payload
 
     def _responses_message_content(self, message: Message) -> str | list[dict[str, Any]]:
@@ -220,6 +248,45 @@ class OpenAICompatProvider(Provider):
                 "Analyze this attached image for the current task."
             ),
         )
+
+    def _codex_function_call_item(self, call_id: str, name: str, arguments: str) -> dict[str, Any]:
+        return {
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": arguments,
+        }
+
+    def _codex_append_assistant(self, items: list[dict[str, Any]], message: Message, seen: set[str]) -> None:
+        if str(message.content or "").strip() or not message.tool_calls:
+            items.append({"role": message.role.value, "content": self._responses_message_content(message)})
+        for tc in message.tool_calls:
+            items.append(self._codex_function_call_item(tc.id, tc.name, json.dumps(tc.arguments or {})))
+            seen.add(tc.id)
+
+    def _codex_append_tool(self, items: list[dict[str, Any]], message: Message, seen: set[str]) -> None:
+        call_id = message.tool_call_id or ""
+        if call_id not in seen:
+            items.append(self._codex_function_call_item(call_id, message.tool_name or "tool", "{}"))
+            seen.add(call_id)
+        items.append({"type": "function_call_output", "call_id": call_id, "output": message.content})
+        tool_image = self._tool_image_path_from_descriptor(message)
+        if tool_image is None:
+            return
+        bridge = self._tool_image_bridge_user_message(tool_image)
+        items.append({"role": "user", "content": self._responses_message_content(bridge)})
+
+    def _codex_input_items(self, messages: list[Message]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for message in messages:
+            if message.role == Role.ASSISTANT:
+                self._codex_append_assistant(items, message, seen)
+            elif message.role == Role.USER:
+                items.append({"role": message.role.value, "content": self._responses_message_content(message)})
+            elif message.role == Role.TOOL:
+                self._codex_append_tool(items, message, seen)
+        return items
 
     def _generate_chat_completions(self, base: str, token: str, model: str, messages: list[Message], tools: list[dict], on_event=None) -> AssistantResponse:
         url = f"{base.rstrip('/')}/chat/completions"
@@ -349,29 +416,7 @@ class OpenAICompatProvider(Provider):
                     "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
                 })
 
-        input_items: list[dict[str, Any]] = []
-        for m in messages:
-            if m.role.value in ("user", "assistant"):
-                input_items.append({"role": m.role.value, "content": self._responses_message_content(m)})
-            elif m.role.value == "tool":
-                call_id = m.tool_call_id or ""
-                tool_name = m.tool_name or "tool"
-                # Responses API requires call_id in function_call_output to match a function_call item in input scope.
-                input_items.append({
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": tool_name,
-                    "arguments": "{}",
-                })
-                input_items.append({
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": m.content,
-                })
-                tool_image = self._tool_image_path_from_descriptor(m)
-                if tool_image is not None:
-                    bridge = self._tool_image_bridge_user_message(tool_image)
-                    input_items.append({"role": "user", "content": self._responses_message_content(bridge)})
+        input_items = self._codex_input_items(messages)
 
         payload = {
             "model": model,
