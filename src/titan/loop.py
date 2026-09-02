@@ -5,11 +5,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from .config import HarnessConfig
+from .leftover import CONTINUE_LOOP, leftover_block_note
 from .permissions import PermissionError, PermissionPolicy
 from .provider import Provider, ProviderError, retry_call
 from .session import SessionStore
 from .tools import ToolRegistry
-from .types import Message, Role, RunOutcome, RunStopContract, RunStopReason
+from .types import Message, Role, RunOutcome, RunStopContract, RunStopReason, ToolResult
 from .image_paths import local_image_references_from_text
 
 
@@ -101,6 +102,205 @@ class AgentEvent:
     payload: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class _LoopCounters:
+    iterations: int = 0
+    tool_calls_total: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    had_tools: bool = False
+    consecutive_empty_turns: int = 0
+
+
+def _emit_agent_event(on_event: Optional[Callable[[AgentEvent], None]], event_type: str, **payload: Any) -> None:
+    if on_event is not None:
+        on_event(AgentEvent(type=event_type, payload=payload))
+
+
+def _loop_finalize(
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+    text: str,
+    reason: RunStopReason,
+    elapsed_ms: int,
+    notes: str,
+    include_usage: bool = False,
+) -> RunOutcome:
+    usage = _usage(counters.input_tokens, counters.output_tokens) if include_usage else None
+    outcome = _stop_outcome(
+        text=text,
+        reason=reason,
+        iterations=counters.iterations,
+        tool_calls_total=counters.tool_calls_total,
+        elapsed_ms=elapsed_ms,
+        notes=notes,
+        usage=usage,
+    )
+    _emit_completed(emit, reason, elapsed_ms, notes)
+    return outcome
+
+
+def _schedule_empty_turn_recovery(
+    loop: "AgentLoop",
+    user_input: str,
+    history: list[Message],
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+    elapsed_ms: int,
+) -> RunOutcome | None:
+    counters.consecutive_empty_turns += 1
+    if counters.consecutive_empty_turns > loop.config.max_consecutive_empty_turns:
+        notes = (
+            "empty assistant output persisted after tool use "
+            f"for {counters.consecutive_empty_turns} consecutive turns"
+        )
+        return _loop_finalize(
+            emit,
+            counters,
+            text="",
+            reason=RunStopReason.ErrorRecoveryExhausted,
+            elapsed_ms=elapsed_ms,
+            notes=notes,
+            include_usage=True,
+        )
+
+    recovery_message = _recovery_message(user_input, counters.iterations, counters.tool_calls_total)
+    _append_recovery_prompt(loop._append, history, recovery_message)
+    _emit_recovery(emit, counters.consecutive_empty_turns, counters.iterations, counters.tool_calls_total)
+    return None
+
+
+def _tool_defs_for_history(tool_defs: list[dict], history: list[Message], emit: Callable[..., None]) -> list[dict]:
+    local_image_refs: list[str] = []
+    for message in history:
+        if message.role != Role.USER:
+            continue
+        local_image_refs.extend(local_image_references_from_text(message.content))
+    if not local_image_refs:
+        return tool_defs
+    emit("image_attachments_detected", count=len(local_image_refs), references=local_image_refs)
+    filtered = []
+    for tool_def in tool_defs:
+        name = (tool_def.get("function", {}) or {}).get("name")
+        if name == "browser_navigate":
+            continue
+        filtered.append(tool_def)
+    return filtered
+
+
+def _loop_call_provider(
+    loop: "AgentLoop",
+    history: list[Message],
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+    elapsed_ms: int,
+):
+    try:
+        tool_defs = _tool_defs_for_history(loop.tools.definitions(), history, emit)
+        emit("provider_request", iteration=counters.iterations)
+        resp = retry_call(lambda: loop.provider.generate(loop.config.model, history, tool_defs), loop.config.retry)
+        return resp, None
+    except ProviderError as exc:
+        reason = RunStopReason.ErrorRetryExhausted if exc.retryable else RunStopReason.ErrorNonRetryable
+        emit("provider_error", error=str(exc), retryable=exc.retryable)
+        outcome = _loop_finalize(
+            emit,
+            counters,
+            text=f"Provider error: {str(exc)}",
+            reason=reason,
+            elapsed_ms=elapsed_ms,
+            notes=str(exc),
+        )
+        return None, outcome
+
+
+def _handle_empty_tool_calls(
+    loop: "AgentLoop",
+    user_input: str,
+    history: list[Message],
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+    resp,
+    elapsed_ms: int,
+):
+    if resp.tool_calls:
+        return None
+    if counters.had_tools and not resp.text.strip():
+        recovered = _schedule_empty_turn_recovery(loop, user_input, history, emit, counters, elapsed_ms)
+        if recovered is not None:
+            return recovered
+        return CONTINUE_LOOP
+    blocked = leftover_block_note(user_input, lambda msg: loop._append(history, msg), emit)
+    if blocked is not None:
+        return blocked
+    return _loop_finalize(
+        emit,
+        counters,
+        text=resp.text,
+        reason=RunStopReason.AssistantFinal,
+        elapsed_ms=elapsed_ms,
+        notes="",
+        include_usage=True,
+    )
+
+
+def _loop_run_tool_calls(
+    loop: "AgentLoop",
+    history: list[Message],
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+    resp,
+    elapsed_ms: int,
+):
+    counters.consecutive_empty_turns = 0
+    if len(resp.tool_calls) > loop.config.max_tool_calls_per_iteration:
+        return _loop_finalize(
+            emit,
+            counters,
+            text="",
+            reason=RunStopReason.BudgetToolsIteration,
+            elapsed_ms=elapsed_ms,
+            notes="tool calls per iteration exceeded",
+        )
+
+    counters.had_tools = True
+    for tool_call in resp.tool_calls:
+        counters.tool_calls_total += 1
+        emit("tool_call", id=tool_call.id, name=tool_call.name, arguments=tool_call.arguments, count=counters.tool_calls_total)
+        if counters.tool_calls_total > loop.config.max_tool_calls_total:
+            return _loop_finalize(
+                emit,
+                counters,
+                text="",
+                reason=RunStopReason.BudgetToolsTotal,
+                elapsed_ms=elapsed_ms,
+                notes="tool calls total exceeded",
+            )
+        try:
+            loop.policy.authorize(tool_call.name)
+            result = loop.tools.execute(tool_call.id, tool_call.name, tool_call.arguments)
+        except PermissionError as exc:
+            result = ToolResult(call_id=tool_call.id, tool_name=tool_call.name, content=str(exc), is_error=True)
+        loop._append(
+            history,
+            Message(
+                role=Role.TOOL,
+                content=result.content,
+                tool_call_id=result.call_id,
+                tool_name=result.tool_name,
+                is_error=result.is_error,
+            ),
+        )
+        emit(
+            "tool_result",
+            id=result.call_id,
+            name=result.tool_name,
+            is_error=result.is_error,
+            content=result.content,
+        )
+    return None
+
+
 class AgentLoop:
     def __init__(self, provider: Provider, tools: ToolRegistry, config: HarnessConfig, session: Optional[SessionStore] = None):
         self.provider = provider
@@ -123,64 +323,17 @@ class AgentLoop:
         history: list[Message],
         on_event: Optional[Callable[[AgentEvent], None]] = None,
     ) -> RunOutcome:
-        def emit(event_type: str, **payload: Any) -> None:
-            if on_event is not None:
-                on_event(AgentEvent(type=event_type, payload=payload))
-
+        emit = lambda event_type, **payload: _emit_agent_event(on_event, event_type, **payload)
         started = time.time()
-        iterations = 0
-        tool_calls_total = 0
-        input_tokens = 0
-        output_tokens = 0
-        had_tools = False
-        consecutive_empty_turns = 0
-
-        def finalize(
-            text: str,
-            reason: RunStopReason,
-            elapsed_ms: int,
-            notes: str,
-            include_usage: bool = False,
-        ) -> RunOutcome:
-            outcome = _stop_outcome(
-                text=text,
-                reason=reason,
-                iterations=iterations,
-                tool_calls_total=tool_calls_total,
-                elapsed_ms=elapsed_ms,
-                notes=notes,
-                usage=_usage(input_tokens, output_tokens) if include_usage else None,
-            )
-            _emit_completed(emit, reason, elapsed_ms, notes)
-            return outcome
-
-        def schedule_empty_turn_recovery(elapsed_ms: int) -> RunOutcome | None:
-            nonlocal consecutive_empty_turns
-            consecutive_empty_turns += 1
-            if consecutive_empty_turns > self.config.max_consecutive_empty_turns:
-                notes = (
-                    "empty assistant output persisted after tool use "
-                    f"for {consecutive_empty_turns} consecutive turns"
-                )
-                return finalize(
-                    text="",
-                    reason=RunStopReason.ErrorRecoveryExhausted,
-                    elapsed_ms=elapsed_ms,
-                    notes=notes,
-                    include_usage=True,
-                )
-
-            recovery_message = _recovery_message(user_input, iterations, tool_calls_total)
-            _append_recovery_prompt(self._append, history, recovery_message)
-            _emit_recovery(emit, consecutive_empty_turns, iterations, tool_calls_total)
-            return None
-
+        counters = _LoopCounters()
         self._append(history, Message(role=Role.USER, content=user_input))
         emit("user_message", text=user_input)
         emit("run_started")
 
-        if not any(m.role == Role.USER for m in history):
-            return finalize(
+        if not any(message.role == Role.USER for message in history):
+            return _loop_finalize(
+                emit,
+                counters,
                 text="",
                 reason=RunStopReason.ErrorNonRetryable,
                 elapsed_ms=0,
@@ -190,113 +343,44 @@ class AgentLoop:
         while True:
             elapsed_ms = int((time.time() - started) * 1000)
             if elapsed_ms > self.config.max_wall_clock_ms:
-                return finalize(
+                return _loop_finalize(
+                    emit,
+                    counters,
                     text="",
                     reason=RunStopReason.BudgetWallClock,
                     elapsed_ms=elapsed_ms,
                     notes="wall clock exceeded",
                 )
 
-            iterations += 1
-            emit("iteration_started", iteration=iterations, elapsed_ms=elapsed_ms)
-
-            if iterations > self.config.max_iterations:
-                return finalize(
+            counters.iterations += 1
+            emit("iteration_started", iteration=counters.iterations, elapsed_ms=elapsed_ms)
+            if counters.iterations > self.config.max_iterations:
+                return _loop_finalize(
+                    emit,
+                    counters,
                     text="",
                     reason=RunStopReason.BudgetIterations,
                     elapsed_ms=elapsed_ms,
                     notes="max iterations",
                 )
 
-            try:
-                tool_defs = self.tools.definitions()
-                local_image_refs: list[str] = []
-                for m in history:
-                    if m.role != Role.USER:
-                        continue
-                    local_image_refs.extend(local_image_references_from_text(m.content))
-                if local_image_refs:
-                    tool_defs = [
-                        td
-                        for td in tool_defs
-                        if (td.get("function", {}) or {}).get("name") != "browser_navigate"
-                    ]
-                    emit("image_attachments_detected", count=len(local_image_refs), references=local_image_refs)
+            resp, error_outcome = _loop_call_provider(self, history, emit, counters, elapsed_ms)
+            if error_outcome is not None:
+                return error_outcome
 
-                emit("provider_request", iteration=iterations)
-                resp = retry_call(lambda: self.provider.generate(self.config.model, history, tool_defs), self.config.retry)
-            except ProviderError as e:
-                reason = RunStopReason.ErrorRetryExhausted if e.retryable else RunStopReason.ErrorNonRetryable
-                msg = f"Provider error: {str(e)}"
-                emit("provider_error", error=str(e), retryable=e.retryable)
-                return finalize(
-                    text=msg,
-                    reason=reason,
-                    elapsed_ms=elapsed_ms,
-                    notes=str(e),
-                )
-
-            input_tokens += resp.input_tokens
-            output_tokens += resp.output_tokens
+            counters.input_tokens += resp.input_tokens
+            counters.output_tokens += resp.output_tokens
             self._append(history, Message(role=Role.ASSISTANT, content=resp.text))
             if resp.text.strip():
-                consecutive_empty_turns = 0
+                counters.consecutive_empty_turns = 0
                 emit("assistant_message", text=resp.text)
 
-            if not resp.tool_calls:
-                if had_tools and not resp.text.strip():
-                    maybe_outcome = schedule_empty_turn_recovery(elapsed_ms)
-                    if maybe_outcome is not None:
-                        return maybe_outcome
-                    continue
+            empty_outcome = _handle_empty_tool_calls(self, user_input, history, emit, counters, resp, elapsed_ms)
+            if empty_outcome is CONTINUE_LOOP:
+                continue
+            if empty_outcome is not None:
+                return empty_outcome
 
-                return finalize(
-                    text=resp.text,
-                    reason=RunStopReason.AssistantFinal,
-                    elapsed_ms=elapsed_ms,
-                    notes="",
-                    include_usage=True,
-                )
-
-            consecutive_empty_turns = 0
-            recovery_attempts = 0
-            if len(resp.tool_calls) > self.config.max_tool_calls_per_iteration:
-                return finalize(
-                    text="",
-                    reason=RunStopReason.BudgetToolsIteration,
-                    elapsed_ms=elapsed_ms,
-                    notes="tool calls per iteration exceeded",
-                )
-
-            had_tools = True
-            for tc in resp.tool_calls:
-                tool_calls_total += 1
-                emit("tool_call", id=tc.id, name=tc.name, arguments=tc.arguments, count=tool_calls_total)
-
-                if tool_calls_total > self.config.max_tool_calls_total:
-                    return finalize(
-                        text="",
-                        reason=RunStopReason.BudgetToolsTotal,
-                        elapsed_ms=elapsed_ms,
-                        notes="tool calls total exceeded",
-                    )
-
-                try:
-                    self.policy.authorize(tc.name)
-                    tr = self.tools.execute(tc.id, tc.name, tc.arguments)
-                except PermissionError as e:
-                    from .types import ToolResult
-
-                    tr = ToolResult(call_id=tc.id, tool_name=tc.name, content=str(e), is_error=True)
-
-                self._append(
-                    history,
-                    Message(role=Role.TOOL, content=tr.content, tool_call_id=tr.call_id, tool_name=tr.tool_name, is_error=tr.is_error),
-                )
-                emit(
-                    "tool_result",
-                    id=tr.call_id,
-                    name=tr.tool_name,
-                    is_error=tr.is_error,
-                    content=tr.content,
-                )
+            tool_outcome = _loop_run_tool_calls(self, history, emit, counters, resp, elapsed_ms)
+            if tool_outcome is not None:
+                return tool_outcome
