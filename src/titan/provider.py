@@ -397,110 +397,180 @@ class OpenAICompatProvider(Provider):
         if item.get("arguments"):
             slot["arguments"] = item.get("arguments")
 
-    def _generate_codex_responses(self, base: str, token: str, model: str, messages: list[Message], tools: list[dict], on_event=None) -> AssistantResponse:
-        url = f"{base.rstrip('/')}/responses"
+    def _codex_system_text(self, messages: list[Message]) -> str:
         system_text = "You are a helpful coding assistant."
-        for m in messages:
-            if m.role.value == "system" and m.content.strip():
-                system_text = m.content.strip()
-                break
+        for message in messages:
+            if message.role.value == "system" and message.content.strip():
+                return message.content.strip()
+        return system_text
 
-        codex_tools = []
-        for t in tools or []:
-            if t.get("type") == "function":
-                fn = t.get("function") or {}
-                codex_tools.append({
+    def _codex_tools_payload(self, tools: list[dict] | None) -> list[dict[str, Any]]:
+        codex_tools: list[dict[str, Any]] = []
+        for tool in tools or []:
+            if tool.get("type") != "function":
+                continue
+            fn = tool.get("function") or {}
+            codex_tools.append(
+                {
                     "type": "function",
                     "name": fn.get("name", ""),
                     "description": fn.get("description", ""),
                     "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
-                })
+                }
+            )
+        return codex_tools
 
-        input_items = self._codex_input_items(messages)
+    def _codex_on_text_delta(self, evt: dict[str, Any], text_parts: list[str], on_event) -> None:
+        delta = evt.get("delta") or ""
+        if not delta:
+            return
+        text_parts.append(delta)
+        if on_event:
+            on_event("stream_delta", text=delta, kind="text")
 
+    def _codex_on_output_item(
+        self,
+        evt: dict[str, Any],
+        tool_calls_by_id: dict[str, dict[str, Any]],
+        item_to_call_id: dict[str, str],
+        on_event,
+    ) -> None:
+        item = evt.get("item") or {}
+        self._merge_tool_call(tool_calls_by_id, item)
+        if item.get("type") != "function_call":
+            return
+        item_id = item.get("id")
+        call_id = item.get("call_id") or item_id
+        if item_id and call_id:
+            item_to_call_id[item_id] = call_id
+        if on_event:
+            on_event("stream_tool_call", id=call_id or "", name=item.get("name", ""), kind="tool_call")
+
+    def _codex_slot(self, tool_calls_by_id: dict[str, dict[str, Any]], call_id: str) -> dict[str, Any]:
+        return tool_calls_by_id.setdefault(call_id, {"id": call_id, "name": "", "arguments": ""})
+
+    def _codex_on_args_delta(
+        self,
+        evt: dict[str, Any],
+        tool_calls_by_id: dict[str, dict[str, Any]],
+        item_to_call_id: dict[str, str],
+    ) -> None:
+        item_id = evt.get("item_id")
+        delta = evt.get("delta") or ""
+        if not (item_id and delta):
+            return
+        call_id = item_to_call_id.get(item_id)
+        if not call_id:
+            return
+        slot = self._codex_slot(tool_calls_by_id, call_id)
+        slot["arguments"] = (slot.get("arguments") or "") + delta
+
+    def _codex_on_args_done(
+        self,
+        evt: dict[str, Any],
+        tool_calls_by_id: dict[str, dict[str, Any]],
+        item_to_call_id: dict[str, str],
+    ) -> None:
+        item_id = evt.get("item_id")
+        args = evt.get("arguments")
+        if not item_id or args is None:
+            return
+        call_id = item_to_call_id.get(item_id)
+        if not call_id:
+            return
+        self._codex_slot(tool_calls_by_id, call_id)["arguments"] = args
+
+    def _codex_on_completed(
+        self,
+        evt: dict[str, Any],
+        text_parts: list[str],
+        tool_calls_by_id: dict[str, dict[str, Any]],
+    ) -> None:
+        if not text_parts:
+            completed_text = self._extract_text_from_completed_event(evt)
+            if completed_text:
+                text_parts.append(completed_text)
+        for item in ((evt.get("response") or {}).get("output") or []):
+            self._merge_tool_call(tool_calls_by_id, item)
+
+    def _dispatch_codex_event(
+        self,
+        evt: dict[str, Any],
+        text_parts: list[str],
+        tool_calls_by_id: dict[str, dict[str, Any]],
+        item_to_call_id: dict[str, str],
+        on_event,
+    ) -> None:
+        event_type = evt.get("type")
+        if event_type == "response.output_text.delta":
+            self._codex_on_text_delta(evt, text_parts, on_event)
+            return
+        if event_type in {"response.output_item.added", "response.output_item.done"}:
+            self._codex_on_output_item(evt, tool_calls_by_id, item_to_call_id, on_event)
+            return
+        if event_type == "response.function_call_arguments.delta":
+            self._codex_on_args_delta(evt, tool_calls_by_id, item_to_call_id)
+            return
+        if event_type == "response.function_call_arguments.done":
+            self._codex_on_args_done(evt, tool_calls_by_id, item_to_call_id)
+            return
+        if event_type == "response.completed":
+            self._codex_on_completed(evt, text_parts, tool_calls_by_id)
+            return
+        if event_type == "error":
+            raise ProviderError(f"codex_error: {json.dumps(evt.get('error') or evt)}", retryable=False)
+
+    def _iter_codex_events(self, resp):
+        for raw in resp:
+            line = raw.decode(errors="ignore").strip()
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                evt = self._parse_sse_data(data_str)
+            except Exception:
+                evt = None
+            if evt:
+                yield evt
+
+    def _consume_codex_stream(self, resp, on_event) -> tuple[list[str], dict[str, dict[str, Any]]]:
+        text_parts: list[str] = []
+        tool_calls_by_id: dict[str, dict[str, Any]] = {}
+        item_to_call_id: dict[str, str] = {}
+        for evt in self._iter_codex_events(resp):
+            self._dispatch_codex_event(evt, text_parts, tool_calls_by_id, item_to_call_id, on_event)
+        return text_parts, tool_calls_by_id
+
+    def _codex_parsed_tool_calls(self, tool_calls_by_id: dict[str, dict[str, Any]]) -> list[ToolCall]:
+        parsed: list[ToolCall] = []
+        for call_id, tc in tool_calls_by_id.items():
+            args_raw = tc.get("arguments") or "{}"
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            except Exception:
+                args = {}
+            parsed.append(ToolCall(id=call_id, name=tc.get("name", ""), arguments=args if isinstance(args, dict) else {}))
+        return parsed
+
+    def _generate_codex_responses(self, base: str, token: str, model: str, messages: list[Message], tools: list[dict], on_event=None) -> AssistantResponse:
+        url = f"{base.rstrip('/')}/responses"
         payload = {
             "model": model,
-            "instructions": system_text,
-            "input": input_items,
+            "instructions": self._codex_system_text(messages),
+            "input": self._codex_input_items(messages),
             "stream": True,
             "store": False,
-            "tools": codex_tools,
+            "tools": self._codex_tools_payload(tools),
         }
-
         req = request.Request(url, method="POST")
         req.add_header("Content-Type", "application/json")
         req.add_header("Accept", "text/event-stream")
         req.add_header("Authorization", f"Bearer {token}")
-        body = json.dumps(payload).encode()
-
-        text_parts: list[str] = []
-        tool_calls_by_id: dict[str, dict[str, Any]] = {}
-        item_to_call_id: dict[str, str] = {}
-
         try:
-            with request.urlopen(req, data=body, timeout=120) as resp:
-                for raw in resp:
-                    line = raw.decode(errors="ignore").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data_str = line[5:].strip()
-                    if not data_str or data_str == "[DONE]":
-                        continue
-                    try:
-                        evt = self._parse_sse_data(data_str)
-                    except Exception:
-                        evt = None
-                    if not evt:
-                        continue
-
-                    t = evt.get("type")
-                    if t == "response.output_text.delta":
-                        d = evt.get("delta") or ""
-                        if d:
-                            text_parts.append(d)
-                            if on_event:
-                                on_event("stream_delta", text=d, kind="text")
-                    elif t == "response.output_item.added" or t == "response.output_item.done":
-                        item = evt.get("item") or {}
-                        self._merge_tool_call(tool_calls_by_id, item)
-                        if item.get("type") == "function_call":
-                            item_id = item.get("id")
-                            call_id = item.get("call_id") or item_id
-                            if item_id and call_id:
-                                item_to_call_id[item_id] = call_id
-                            if on_event:
-                                on_event(
-                                    "stream_tool_call",
-                                    id=call_id or "",
-                                    name=item.get("name", ""),
-                                    kind="tool_call",
-                                )
-                    elif t == "response.function_call_arguments.delta":
-                        item_id = evt.get("item_id")
-                        delta = evt.get("delta") or ""
-                        if item_id and delta:
-                            call_id = item_to_call_id.get(item_id)
-                            if call_id:
-                                slot = tool_calls_by_id.setdefault(call_id, {"id": call_id, "name": "", "arguments": ""})
-                                slot["arguments"] = (slot.get("arguments") or "") + delta
-                    elif t == "response.function_call_arguments.done":
-                        item_id = evt.get("item_id")
-                        args = evt.get("arguments")
-                        if item_id and args is not None:
-                            call_id = item_to_call_id.get(item_id)
-                            if call_id:
-                                slot = tool_calls_by_id.setdefault(call_id, {"id": call_id, "name": "", "arguments": ""})
-                                slot["arguments"] = args
-                    elif t == "response.completed":
-                        if not text_parts:
-                            completed_text = self._extract_text_from_completed_event(evt)
-                            if completed_text:
-                                text_parts.append(completed_text)
-                        for item in ((evt.get("response") or {}).get("output") or []):
-                            self._merge_tool_call(tool_calls_by_id, item)
-                    elif t == "error":
-                        err = evt.get("error") or evt
-                        raise ProviderError(f"codex_error: {json.dumps(err)}", retryable=False)
+            with request.urlopen(req, data=json.dumps(payload).encode(), timeout=120) as resp:
+                text_parts, tool_calls_by_id = self._consume_codex_stream(resp, on_event)
         except ProviderError:
             raise
         except error.HTTPError as e:
@@ -509,15 +579,9 @@ class OpenAICompatProvider(Provider):
             raise ProviderError(f"http {e.code}: {txt}", retryable=retryable)
         except Exception as e:
             raise ProviderError(str(e), retryable=True)
-
-        parsed_tool_calls: list[ToolCall] = []
-        for call_id, tc in tool_calls_by_id.items():
-            args_raw = tc.get("arguments") or "{}"
-            try:
-                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
-            except Exception:
-                args = {}
-            parsed_tool_calls.append(ToolCall(id=call_id, name=tc.get("name", ""), arguments=args if isinstance(args, dict) else {}))
-
-        text = "".join(text_parts).strip()
-        return AssistantResponse(text=text, tool_calls=parsed_tool_calls, input_tokens=0, output_tokens=0)
+        return AssistantResponse(
+            text="".join(text_parts).strip(),
+            tool_calls=self._codex_parsed_tool_calls(tool_calls_by_id),
+            input_tokens=0,
+            output_tokens=0,
+        )

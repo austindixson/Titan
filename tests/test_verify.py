@@ -281,7 +281,12 @@ def test_evidence_is_assistant_tool_pair_with_verify_call_id(monkeypatch, tmp_pa
     assert tool.is_error is False
 
     rows = _session_rows(tmp_path / "session.jsonl")
-    assistant_row = next(r for r in rows if r.get("role") == "assistant" and r.get("tool_calls"))
+    assistant_row = next(
+        r
+        for r in rows
+        if r.get("role") == "assistant"
+        and any(tc.get("id") == call_id for tc in (r.get("tool_calls") or []))
+    )
     tool_row = next(r for r in rows if r.get("role") == "tool" and r.get("tool_call_id") == call_id)
     assert assistant_row["tool_calls"][0]["id"] == call_id
     assert assistant_row["tool_calls"][0]["name"] == "shell"
