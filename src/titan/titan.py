@@ -220,7 +220,7 @@ class IntentRouter:
                 OrchestratorState.PLAN,
                 "delegation cue detected; stay in-process",
                 "Start with a brief plan only when it reduces risk, then execute in-process. "
-                "Do not call delegate_task. Prefer tool use for code/file/system work and verify changes.",
+                "Do not hand work to a subagent. Prefer tool use for code/file/system work and verify changes.",
             )
         if normalized in self.DIRECT_KEYWORDS or (word_count <= 4 and not any(k in normalized for k in self.PLAN_KEYWORDS)):
             return RouteDecision(

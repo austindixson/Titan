@@ -11,7 +11,7 @@ from .provider import Provider, ProviderError, retry_call
 from .session import SessionStore
 from .tools import ToolRegistry
 from .types import Message, Role, RunOutcome, RunStopContract, RunStopReason, ToolResult
-from .image_paths import local_image_references_from_text
+from .image_paths import candidate_image_paths_from_text, local_image_references_from_text
 
 
 EMPTY_TURN_RECOVERY_TEMPLATE = (
@@ -193,15 +193,36 @@ def _schedule_empty_turn_recovery(
     return None
 
 
-def _tool_defs_for_history(tool_defs: list[dict], history: list[Message], emit: Callable[..., None]) -> list[dict]:
-    local_image_refs: list[str] = []
+def _user_image_refs(history: list[Message]) -> tuple[list[str], list]:
+    refs: list[str] = []
+    seen_refs: set[str] = set()
+    paths: list = []
+    seen_paths: set = set()
     for message in history:
         if message.role != Role.USER:
             continue
-        local_image_refs.extend(local_image_references_from_text(message.content))
+        for ref in local_image_references_from_text(message.content):
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+            refs.append(ref)
+        for path in candidate_image_paths_from_text(message.content):
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            paths.append(path)
+    return refs, paths
+
+
+def _tool_defs_for_history(tool_defs: list[dict], history: list[Message], emit: Callable[..., None]) -> list[dict]:
+    local_image_refs, existing_paths = _user_image_refs(history)
     if not local_image_refs:
         return tool_defs
-    emit("image_attachments_detected", count=len(local_image_refs), references=local_image_refs)
+    emit(
+        "image_attachments_detected",
+        count=len(existing_paths) if existing_paths else len(local_image_refs),
+        references=local_image_refs,
+    )
     filtered = []
     for tool_def in tool_defs:
         name = (tool_def.get("function", {}) or {}).get("name")
