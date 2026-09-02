@@ -737,34 +737,36 @@ class TitanTui(App[None]):
 
         def _run_blocking() -> None:
             def cb(ev: AgentEvent) -> None:
-                self.post_message(LoopEventMsg(ev))
+                self._post_loop_event(ev)
 
             out = self.harness.run_with_callback(task, self.history, on_event=cb)
             self.post_message(LoopDoneMsg(out))
 
         self.run_worker(_run_blocking, thread=True)
 
-    def _trace_git_event(self, ev: AgentEvent, trace: SelectableRichLog) -> bool:
+    def _trace_git_event(self, ev: AgentEvent) -> None:
+        trace = self.query_one("#trace", SelectableRichLog)
         if ev.type == "git_checkpoint":
             cid = ev.payload.get("id", "")
             self._record_progress_event(f"wrote git checkpoint {cid}")
             self._trace_emit(trace, f"git-checkpoint {cid}", ev.payload)
-            return True
-        if ev.type == "undo":
+        elif ev.type == "undo":
             cid = ev.payload.get("id", "")
             ok = ev.payload.get("ok", True)
             label = "undo" if ok else "undo-aborted"
             self._record_progress_event(f"{label} {cid}")
             self._trace_emit(trace, f"{label} {cid}", ev.payload)
-            return True
-        return False
+        self._refresh_status()
+
+    def _post_loop_event(self, ev: AgentEvent) -> None:
+        if ev.type in {"git_checkpoint", "undo"}:
+            self._trace_git_event(ev)
+            return
+        self.post_message(LoopEventMsg(ev))
 
     def on_loop_event_msg(self, msg: LoopEventMsg) -> None:
         ev = msg.event
         trace = self.query_one("#trace", SelectableRichLog)
-        if self._trace_git_event(ev, trace):
-            self._refresh_status()
-            return
 
         if ev.type == "run_started":
             pass

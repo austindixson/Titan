@@ -232,12 +232,8 @@ def test_tui_trace_shows_git_checkpoint_and_undo_events(monkeypatch):
     async def _run():
         app = TitanTui()
         async with app.run_test(size=(100, 32)):
-            app.on_loop_event_msg(
-                titan_tui_module.LoopEventMsg(AgentEvent("git_checkpoint", {"id": "20260101T000000000000Z"}))
-            )
-            app.on_loop_event_msg(
-                titan_tui_module.LoopEventMsg(AgentEvent("undo", {"id": "20260101T000000000000Z", "ok": True}))
-            )
+            app._trace_git_event(AgentEvent("git_checkpoint", {"id": "20260101T000000000000Z"}))
+            app._trace_git_event(AgentEvent("undo", {"id": "20260101T000000000000Z", "ok": True}))
             assert any("git-checkpoint 20260101T000000000000Z" in line for line in app.trace_lines)
             assert any(line.startswith("undo 20260101T000000000000Z") for line in app.trace_lines)
 
