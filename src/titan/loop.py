@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from .config import HarnessConfig
+from .leftover import find_leftovers, leftover_user_note
 from .permissions import PermissionError, PermissionPolicy
 from .provider import Provider, ProviderError, retry_call
 from .session import SessionStore
@@ -248,6 +249,12 @@ class AgentLoop:
                     maybe_outcome = schedule_empty_turn_recovery(elapsed_ms)
                     if maybe_outcome is not None:
                         return maybe_outcome
+                    continue
+
+                leftovers = find_leftovers(user_input)
+                if leftovers:
+                    self._append(history, Message(role=Role.USER, content=leftover_user_note(leftovers)))
+                    emit("leftover_stop_blocked", leftovers=leftovers)
                     continue
 
                 return finalize(

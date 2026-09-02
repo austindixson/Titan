@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 
 from .config import HarnessConfig
 from .image_paths import candidate_image_paths_from_text, local_image_references_from_text
+from .leftover import find_leftovers, leftover_user_note
 from .loop import AgentEvent
 from .permissions import PermissionError, PermissionPolicy
 from .provider import Provider, ProviderError, retry_call
@@ -350,6 +351,12 @@ class TitanHarness:
                 )
 
             if not resp.tool_calls:
+                leftovers = find_leftovers(task)
+                if leftovers:
+                    self._append(history, Message(role=Role.USER, content=leftover_user_note(leftovers)))
+                    emit("leftover_stop_blocked", leftovers=leftovers)
+                    continue
+
                 elapsed_ms = int((time.time() - started) * 1000)
                 if _should_distill_skill(self.config, tool_calls_total, session.turn):
                     skill_path = self.learning.distill_skill(trace_id, session.trace, success_score=1.0 if resp.text.strip() else 0.5)
@@ -477,6 +484,13 @@ class TitanHarness:
                 emit("on_skill_created", path=str(skill_path))
 
             if session.current_state == OrchestratorState.FINALIZE:
+                leftovers = find_leftovers(task)
+                if leftovers:
+                    self._append(history, Message(role=Role.USER, content=leftover_user_note(leftovers)))
+                    emit("leftover_stop_blocked", leftovers=leftovers)
+                    session.current_state = OrchestratorState.ACT
+                    continue
+
                 elapsed_ms = int((time.time() - started) * 1000)
                 self.session_store.checkpoint(session.current_state.value, session.turn, "finalize")
                 return RunOutcome(
