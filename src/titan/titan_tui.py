@@ -684,29 +684,36 @@ class TitanTui(App[None]):
         composer.paste_payloads.clear()
         await self._submit_task(task)
 
-    async def _submit_task(self, task: str) -> None:
-        if not task or self.ui.pending:
-            return
+    def _handle_slash_task(self, task: str) -> bool:
+        res = execute_slash_command(task, run_pending=self.ui.pending)
+        if not res.handled:
+            return False
+        if res.message == "trace-toggle":
+            self.action_toggle_trace_verbosity()
+            self._write_chat_box("You", task, "cyan")
+            self._write_chat_box("Titan", "toggled trace verbosity", "green")
+            return True
+        if task.startswith("/config"):
+            previous_provider = self.harness.config.provider
+            self.cfg = load_harness_config()
+            self.harness.config = self.cfg
+            if self.cfg.provider != previous_provider:
+                self.harness.provider = build_provider_from_config(self.cfg)
+            self._apply_responsive_layout(self.size.width)
+        self._write_chat_box("You", task, "cyan")
+        prefix = "Titan error" if res.is_error else "Titan"
+        self._write_chat_box(prefix, res.message, "red" if res.is_error else "green")
+        if task.startswith("/undo") or task.startswith("/checkpoints"):
+            self._write_trace(res.message)
+        return True
 
-        if task.startswith("/"):
-            res = execute_slash_command(task)
-            if res.handled:
-                if res.message == "trace-toggle":
-                    self.action_toggle_trace_verbosity()
-                    self._write_chat_box("You", task, "cyan")
-                    self._write_chat_box("Titan", "toggled trace verbosity", "green")
-                else:
-                    if task.startswith("/config"):
-                        previous_provider = self.harness.config.provider
-                        self.cfg = load_harness_config()
-                        self.harness.config = self.cfg
-                        if self.cfg.provider != previous_provider:
-                            self.harness.provider = build_provider_from_config(self.cfg)
-                        self._apply_responsive_layout(self.size.width)
-                    self._write_chat_box("You", task, "cyan")
-                    prefix = "Titan error" if res.is_error else "Titan"
-                    self._write_chat_box(prefix, res.message, "red" if res.is_error else "green")
-                return
+    async def _submit_task(self, task: str) -> None:
+        if not task:
+            return
+        if task.startswith("/") and self._handle_slash_task(task):
+            return
+        if self.ui.pending:
+            return
 
         self._write_chat_box("You", task, "cyan")
         self.query_one("#output", SelectableRichLog).refresh()
@@ -737,9 +744,27 @@ class TitanTui(App[None]):
 
         self.run_worker(_run_blocking, thread=True)
 
+    def _trace_git_event(self, ev: AgentEvent, trace: SelectableRichLog) -> bool:
+        if ev.type == "git_checkpoint":
+            cid = ev.payload.get("id", "")
+            self._record_progress_event(f"wrote git checkpoint {cid}")
+            self._trace_emit(trace, f"git-checkpoint {cid}", ev.payload)
+            return True
+        if ev.type == "undo":
+            cid = ev.payload.get("id", "")
+            ok = ev.payload.get("ok", True)
+            label = "undo" if ok else "undo-aborted"
+            self._record_progress_event(f"{label} {cid}")
+            self._trace_emit(trace, f"{label} {cid}", ev.payload)
+            return True
+        return False
+
     def on_loop_event_msg(self, msg: LoopEventMsg) -> None:
         ev = msg.event
         trace = self.query_one("#trace", SelectableRichLog)
+        if self._trace_git_event(ev, trace):
+            self._refresh_status()
+            return
 
         if ev.type == "run_started":
             pass

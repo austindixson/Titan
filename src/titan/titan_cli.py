@@ -34,6 +34,12 @@ from .skills import (
     use_skill,
 )
 from .evals import run_accuracy_eval
+from .git_checkpoint import (
+    GitCheckpointError,
+    format_checkpoint_list,
+    list_checkpoints,
+    restore_checkpoint,
+)
 from .tools import _todo_path as tool_todo_path
 
 
@@ -355,6 +361,8 @@ def cmd_parity_report(write_path: Path = PARITY_REPORT_PATH) -> int:
             "memory": True,
             "eval": True,
             "doctor": True,
+            "undo": True,
+            "checkpoints": True,
         },
     }
 
@@ -479,16 +487,118 @@ def cmd_doctor() -> int:
     return 0
 
 
-def main() -> None:
-    if len(sys.argv) == 1:
-        from .titan_tui import run as run_tui
+def cmd_undo(checkpoint_id: str | None = None) -> int:
+    c = Console()
+    try:
+        result = restore_checkpoint(checkpoint_id=checkpoint_id)
+    except GitCheckpointError as exc:
+        c.print(str(exc))
+        return 1
+    c.print(result.message)
+    if result.missing_untracked:
+        c.print("missing untracked: " + ", ".join(result.missing_untracked))
+    return 0 if result.ok else 1
 
-        run_tui()
-        return
 
-    parser = argparse.ArgumentParser(prog="titan")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+def cmd_checkpoints() -> int:
+    c = Console()
+    c.print(format_checkpoint_list(list_checkpoints()))
+    return 0
 
+
+def _dispatch_config(args: argparse.Namespace) -> int:
+    if args.config_cmd == "path":
+        Console().print(str(resolve_config_path()))
+        return 0
+    handlers = {
+        "show": cmd_config_show,
+        "set": lambda: cmd_config_set(args.key, args.value),
+        "get": lambda: cmd_config_get(args.key),
+        "unset": lambda: cmd_config_unset(args.key),
+    }
+    handler = handlers.get(args.config_cmd)
+    return handler() if handler else 1
+
+
+def _dispatch_skills(args: argparse.Namespace) -> int:
+    handlers = {
+        "list": cmd_skills_list,
+        "active": cmd_skills_active,
+        "use": lambda: cmd_skills_use(args.slug),
+        "unuse": lambda: cmd_skills_unuse(args.slug),
+        "view": lambda: cmd_skills_view(args.slug),
+        "create": lambda: cmd_skills_create(args.slug, args.content),
+        "delete": lambda: cmd_skills_delete(args.slug),
+    }
+    handler = handlers.get(args.skills_cmd)
+    return handler() if handler else 1
+
+
+def _dispatch_sessions(args: argparse.Namespace) -> int:
+    if args.sessions_cmd == "recent":
+        return cmd_sessions_recent(limit=args.limit)
+    if args.sessions_cmd == "search":
+        return cmd_sessions_search(args.query, limit=args.limit)
+    return 1
+
+
+def _dispatch_eval(args: argparse.Namespace) -> int:
+    return cmd_eval_accuracy() if args.eval_cmd == "accuracy" else 1
+
+
+def _dispatch_report(args: argparse.Namespace) -> int:
+    if args.report_cmd != "parity":
+        return 1
+    return cmd_parity_report(Path(args.out).expanduser().resolve())
+
+
+def _dispatch_todo(args: argparse.Namespace) -> int:
+    if args.todo_cmd == "get":
+        return cmd_todo_get()
+    if args.todo_cmd == "set":
+        return cmd_todo_set(args.todos_json)
+    return 1
+
+
+def _dispatch_simple(args: argparse.Namespace) -> int:
+    handlers = {
+        "run": lambda: cmd_run(args.task, provider=args.provider, model=args.model),
+        "replay": lambda: cmd_replay(args.trace_id),
+        "setup": lambda: cmd_setup(force=bool(args.force)),
+        "eval": lambda: _dispatch_eval(args),
+        "report": lambda: _dispatch_report(args),
+        "todo": lambda: _dispatch_todo(args),
+        "memory": lambda: _dispatch_memory(args),
+        "undo": lambda: cmd_undo(args.checkpoint_id),
+        "checkpoints": cmd_checkpoints,
+        "capability": cmd_capability,
+        "doctor": cmd_doctor,
+    }
+    handler = handlers.get(args.cmd)
+    return handler() if handler else 1
+
+
+def _dispatch_memory(args: argparse.Namespace) -> int:
+    if args.memory_cmd == "get":
+        return cmd_memory_get(args.query)
+    if args.memory_cmd == "add":
+        return cmd_memory_add(args.content)
+    if args.memory_cmd == "remove":
+        return cmd_memory_remove(args.contains)
+    return 1
+
+
+def _dispatch(args: argparse.Namespace) -> int:
+    if args.cmd == "config":
+        return _dispatch_config(args)
+    if args.cmd == "skills":
+        return _dispatch_skills(args)
+    if args.cmd == "sessions":
+        return _dispatch_sessions(args)
+    return _dispatch_simple(args)
+
+
+def _add_parser_tree(sub: argparse._SubParsersAction) -> None:
     run_p = sub.add_parser("run")
     run_p.add_argument("task")
     run_p.add_argument("--provider", default=None)
@@ -560,70 +670,23 @@ def main() -> None:
     memory_rm_p = memory_sub.add_parser("remove")
     memory_rm_p.add_argument("contains")
 
+    undo_p = sub.add_parser("undo")
+    undo_p.add_argument("checkpoint_id", nargs="?", default=None)
+    sub.add_parser("checkpoints")
     sub.add_parser("capability")
     sub.add_parser("doctor")
 
-    args = parser.parse_args()
-    if args.cmd == "run":
-        raise SystemExit(cmd_run(args.task, provider=args.provider, model=args.model))
-    if args.cmd == "replay":
-        raise SystemExit(cmd_replay(args.trace_id))
-    if args.cmd == "setup":
-        raise SystemExit(cmd_setup(force=bool(args.force)))
-    if args.cmd == "config":
-        if args.config_cmd == "path":
-            Console().print(str(resolve_config_path()))
-            raise SystemExit(0)
-        if args.config_cmd == "show":
-            raise SystemExit(cmd_config_show())
-        if args.config_cmd == "set":
-            raise SystemExit(cmd_config_set(args.key, args.value))
-        if args.config_cmd == "get":
-            raise SystemExit(cmd_config_get(args.key))
-        if args.config_cmd == "unset":
-            raise SystemExit(cmd_config_unset(args.key))
-    if args.cmd == "skills":
-        if args.skills_cmd == "list":
-            raise SystemExit(cmd_skills_list())
-        if args.skills_cmd == "active":
-            raise SystemExit(cmd_skills_active())
-        if args.skills_cmd == "use":
-            raise SystemExit(cmd_skills_use(args.slug))
-        if args.skills_cmd == "unuse":
-            raise SystemExit(cmd_skills_unuse(args.slug))
-        if args.skills_cmd == "view":
-            raise SystemExit(cmd_skills_view(args.slug))
-        if args.skills_cmd == "create":
-            raise SystemExit(cmd_skills_create(args.slug, args.content))
-        if args.skills_cmd == "delete":
-            raise SystemExit(cmd_skills_delete(args.slug))
-    if args.cmd == "sessions":
-        if args.sessions_cmd == "recent":
-            raise SystemExit(cmd_sessions_recent(limit=args.limit))
-        if args.sessions_cmd == "search":
-            raise SystemExit(cmd_sessions_search(args.query, limit=args.limit))
-    if args.cmd == "eval":
-        if args.eval_cmd == "accuracy":
-            raise SystemExit(cmd_eval_accuracy())
-    if args.cmd == "report":
-        if args.report_cmd == "parity":
-            raise SystemExit(cmd_parity_report(Path(args.out).expanduser().resolve()))
-    if args.cmd == "todo":
-        if args.todo_cmd == "get":
-            raise SystemExit(cmd_todo_get())
-        if args.todo_cmd == "set":
-            raise SystemExit(cmd_todo_set(args.todos_json))
-    if args.cmd == "memory":
-        if args.memory_cmd == "get":
-            raise SystemExit(cmd_memory_get(args.query))
-        if args.memory_cmd == "add":
-            raise SystemExit(cmd_memory_add(args.content))
-        if args.memory_cmd == "remove":
-            raise SystemExit(cmd_memory_remove(args.contains))
-    if args.cmd == "capability":
-        raise SystemExit(cmd_capability())
-    if args.cmd == "doctor":
-        raise SystemExit(cmd_doctor())
+
+def main() -> None:
+    if len(sys.argv) == 1:
+        from .titan_tui import run as run_tui
+
+        run_tui()
+        return
+
+    parser = argparse.ArgumentParser(prog="titan")
+    _add_parser_tree(parser.add_subparsers(dest="cmd", required=True))
+    raise SystemExit(_dispatch(parser.parse_args()))
 
 
 if __name__ == "__main__":

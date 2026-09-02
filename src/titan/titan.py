@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .config import HarnessConfig
+from .git_checkpoint import git_checkpoint
 from .image_paths import candidate_image_paths_from_text, local_image_references_from_text
 from .loop import AgentEvent, AgentLoop
 from .provider import Provider
@@ -288,6 +289,12 @@ class _FacadeRun:
     on_engine_event: Callable[[AgentEvent], None]
 
 
+def _emit_run_git_checkpoint(cwd: Path, emit: Callable[..., None]) -> None:
+    stamp = git_checkpoint(cwd)
+    if stamp:
+        emit("git_checkpoint", id=stamp)
+
+
 class TitanHarness:
     """Product-path facade. AgentLoop is the only orchestrator; this class does not append USER."""
 
@@ -341,6 +348,7 @@ class TitanHarness:
         _merge_routing_into_system(history, decision, plan_budget_text, image_guidance)
         self.session_store.checkpoint(decision.state.value, 0, f"run_start:{decision.reason}")
         emit = lambda event_type, **payload: self._emit_harness(on_event, event_type, **payload)
+        _emit_run_git_checkpoint(self.tools.cwd, emit)
         emit(
             "route_decision",
             state=decision.state.value,
