@@ -5,19 +5,32 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from .config import HarnessConfig
-from .leftover import CONTINUE_LOOP, leftover_block_note
+from .leftover import CONTINUE_LOOP, INTERNAL_NOTE_PREFIX, leftover_block_note
 from .permissions import PermissionError, PermissionPolicy
 from .provider import Provider, ProviderError, retry_call
 from .session import SessionStore
 from .tools import ToolRegistry
 from .types import Message, Role, RunOutcome, RunStopContract, RunStopReason, ToolResult
-from .image_paths import local_image_references_from_text
+from .image_paths import candidate_image_paths_from_text, local_image_references_from_text
 
 
 EMPTY_TURN_RECOVERY_TEMPLATE = (
     "The previous assistant turn was empty after using tools. "
     "Continue the task without apologizing or stopping. "
     "Summarize concrete progress, identify the obstacle, choose a workaround, and either finish the task or take the next best tool action."
+)
+
+RESERVED_FINALIZATION_NOTE = (
+    f"{INTERNAL_NOTE_PREFIX}"
+    "Titan is on the reserved finalization iteration. Do not call tools. "
+    "Return a concise Summary and Next best step using the work already completed."
+)
+
+RESERVED_FINALIZATION_FALLBACK = (
+    "Summary:\n"
+    "- Stopped cleanly on the reserved finalization pass before taking more tool actions.\n\n"
+    "Next best step:\n"
+    "- Continue the task with a fresh iteration budget."
 )
 
 
@@ -68,8 +81,16 @@ def _stop_outcome(
 
 
 def _append_recovery_prompt(append_message: Callable[[list[Message], Message], None], history: list[Message], recovery_message: str) -> None:
-    append_message(history, Message(role=Role.SYSTEM, content=recovery_message))
-    append_message(history, Message(role=Role.USER, content="Continue and finish the task using the available context and tools."))
+    append_message(
+        history,
+        Message(
+            role=Role.USER,
+            content=(
+                f"{INTERNAL_NOTE_PREFIX}{recovery_message}\n"
+                "Continue and finish the task using the available context and tools."
+            ),
+        ),
+    )
 
 
 def _usage(input_tokens: int, output_tokens: int) -> dict[str, int]:
@@ -106,10 +127,12 @@ class AgentEvent:
 class _LoopCounters:
     iterations: int = 0
     tool_calls_total: int = 0
+    tool_calls_this_turn: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     had_tools: bool = False
     consecutive_empty_turns: int = 0
+    budget_finalization_requested: bool = False
 
 
 def _emit_agent_event(on_event: Optional[Callable[[AgentEvent], None]], event_type: str, **payload: Any) -> None:
@@ -170,15 +193,36 @@ def _schedule_empty_turn_recovery(
     return None
 
 
-def _tool_defs_for_history(tool_defs: list[dict], history: list[Message], emit: Callable[..., None]) -> list[dict]:
-    local_image_refs: list[str] = []
+def _user_image_refs(history: list[Message]) -> tuple[list[str], list]:
+    refs: list[str] = []
+    seen_refs: set[str] = set()
+    paths: list = []
+    seen_paths: set = set()
     for message in history:
         if message.role != Role.USER:
             continue
-        local_image_refs.extend(local_image_references_from_text(message.content))
+        for ref in local_image_references_from_text(message.content):
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+            refs.append(ref)
+        for path in candidate_image_paths_from_text(message.content):
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            paths.append(path)
+    return refs, paths
+
+
+def _tool_defs_for_history(tool_defs: list[dict], history: list[Message], emit: Callable[..., None]) -> list[dict]:
+    local_image_refs, existing_paths = _user_image_refs(history)
     if not local_image_refs:
         return tool_defs
-    emit("image_attachments_detected", count=len(local_image_refs), references=local_image_refs)
+    emit(
+        "image_attachments_detected",
+        count=len(existing_paths) if existing_paths else len(local_image_refs),
+        references=local_image_refs,
+    )
     filtered = []
     for tool_def in tool_defs:
         name = (tool_def.get("function", {}) or {}).get("name")
@@ -186,6 +230,16 @@ def _tool_defs_for_history(tool_defs: list[dict], history: list[Message], emit: 
             continue
         filtered.append(tool_def)
     return filtered
+
+
+def _invoke_provider(loop: "AgentLoop", history: list[Message], tool_defs: list[dict], emit: Callable[..., None]):
+    def on_provider_event(event_type: str, **payload: Any) -> None:
+        emit(f"provider_{event_type}", **payload)
+
+    callback = getattr(loop.provider, "generate_with_callback", None)
+    if callback is not None:
+        return callback(loop.config.model, history, tool_defs, on_event=on_provider_event)
+    return loop.provider.generate(loop.config.model, history, tool_defs)
 
 
 def _loop_call_provider(
@@ -197,8 +251,15 @@ def _loop_call_provider(
 ):
     try:
         tool_defs = _tool_defs_for_history(loop.tools.definitions(), history, emit)
-        emit("provider_request", iteration=counters.iterations)
-        resp = retry_call(lambda: loop.provider.generate(loop.config.model, history, tool_defs), loop.config.retry)
+        emit(
+            "provider_request",
+            iteration=counters.iterations,
+            model=loop.config.model,
+            provider=loop.config.provider,
+            tool_calls_total=counters.tool_calls_total,
+            tool_calls_this_turn=counters.tool_calls_this_turn,
+        )
+        resp = retry_call(lambda: _invoke_provider(loop, history, tool_defs, emit), loop.config.retry)
         return resp, None
     except ProviderError as exc:
         reason = RunStopReason.ErrorRetryExhausted if exc.retryable else RunStopReason.ErrorNonRetryable
@@ -244,6 +305,45 @@ def _handle_empty_tool_calls(
     )
 
 
+def _reject_tool_batch_over_iteration_cap(
+    loop: "AgentLoop",
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+    resp,
+    elapsed_ms: int,
+) -> RunOutcome | None:
+    limit = loop.config.max_tool_calls_per_iteration
+    if len(resp.tool_calls) <= limit:
+        return None
+    emit("tool_batch_rejected", count=len(resp.tool_calls), max_tool_calls_per_iteration=limit)
+    for index, tool_call in enumerate(resp.tool_calls, start=1):
+        emit(
+            "tool_call_rejected",
+            id=tool_call.id,
+            name=tool_call.name,
+            arguments=tool_call.arguments,
+            index=index,
+            count=len(resp.tool_calls),
+            reason="max_tool_calls_per_iteration",
+        )
+    return _loop_finalize(
+        emit,
+        counters,
+        text="",
+        reason=RunStopReason.BudgetToolsIteration,
+        elapsed_ms=elapsed_ms,
+        notes="tool calls per iteration exceeded",
+    )
+
+
+def _execute_authorized_tool(loop: "AgentLoop", tool_call) -> ToolResult:
+    try:
+        loop.policy.authorize(tool_call.name)
+        return loop.tools.execute(tool_call.id, tool_call.name, tool_call.arguments)
+    except PermissionError as exc:
+        return ToolResult(call_id=tool_call.id, tool_name=tool_call.name, content=str(exc), is_error=True)
+
+
 def _loop_run_tool_calls(
     loop: "AgentLoop",
     history: list[Message],
@@ -253,20 +353,24 @@ def _loop_run_tool_calls(
     elapsed_ms: int,
 ):
     counters.consecutive_empty_turns = 0
-    if len(resp.tool_calls) > loop.config.max_tool_calls_per_iteration:
-        return _loop_finalize(
-            emit,
-            counters,
-            text="",
-            reason=RunStopReason.BudgetToolsIteration,
-            elapsed_ms=elapsed_ms,
-            notes="tool calls per iteration exceeded",
-        )
+    capped = _reject_tool_batch_over_iteration_cap(loop, emit, counters, resp, elapsed_ms)
+    if capped is not None:
+        return capped
 
     counters.had_tools = True
+    emit("tool_batch_started", count=len(resp.tool_calls))
     for tool_call in resp.tool_calls:
         counters.tool_calls_total += 1
-        emit("tool_call", id=tool_call.id, name=tool_call.name, arguments=tool_call.arguments, count=counters.tool_calls_total)
+        counters.tool_calls_this_turn += 1
+        emit(
+            "tool_call",
+            id=tool_call.id,
+            name=tool_call.name,
+            arguments=tool_call.arguments,
+            count=counters.tool_calls_total,
+            tool_calls_total=counters.tool_calls_total,
+            tool_calls_this_turn=counters.tool_calls_this_turn,
+        )
         if counters.tool_calls_total > loop.config.max_tool_calls_total:
             return _loop_finalize(
                 emit,
@@ -276,11 +380,7 @@ def _loop_run_tool_calls(
                 elapsed_ms=elapsed_ms,
                 notes="tool calls total exceeded",
             )
-        try:
-            loop.policy.authorize(tool_call.name)
-            result = loop.tools.execute(tool_call.id, tool_call.name, tool_call.arguments)
-        except PermissionError as exc:
-            result = ToolResult(call_id=tool_call.id, tool_name=tool_call.name, content=str(exc), is_error=True)
+        result = _execute_authorized_tool(loop, tool_call)
         loop._append(
             history,
             Message(
@@ -297,8 +397,125 @@ def _loop_run_tool_calls(
             name=result.tool_name,
             is_error=result.is_error,
             content=result.content,
+            tool_calls_total=counters.tool_calls_total,
+            tool_calls_this_turn=counters.tool_calls_this_turn,
         )
     return None
+
+
+def _maybe_request_reserved_finalization(
+    loop: "AgentLoop",
+    history: list[Message],
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+) -> None:
+    if counters.budget_finalization_requested:
+        return
+    remaining = loop.config.max_iterations - counters.iterations + 1
+    if counters.tool_calls_total <= 0 or remaining > 1:
+        return
+    counters.budget_finalization_requested = True
+    loop._append(history, Message(role=Role.USER, content=RESERVED_FINALIZATION_NOTE))
+    emit(
+        "budget_finalization_requested",
+        remaining_iterations=remaining,
+        max_iterations=loop.config.max_iterations,
+        tool_calls_total=counters.tool_calls_total,
+    )
+
+
+def _reserved_finalization_reject(
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+    resp,
+    elapsed_ms: int,
+) -> RunOutcome | None:
+    if not counters.budget_finalization_requested or not resp.tool_calls:
+        return None
+    emit("tool_batch_rejected", count=len(resp.tool_calls), reason="reserved_finalization_iteration")
+    text = resp.text.strip() or RESERVED_FINALIZATION_FALLBACK
+    return _loop_finalize(
+        emit,
+        counters,
+        text=text,
+        reason=RunStopReason.AssistantFinal,
+        elapsed_ms=elapsed_ms,
+        notes="reserved_finalization_iteration",
+        include_usage=True,
+    )
+
+
+def _loop_user_invariant(
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+    history: list[Message],
+) -> RunOutcome | None:
+    if any(message.role == Role.USER for message in history):
+        return None
+    return _loop_finalize(
+        emit,
+        counters,
+        text="",
+        reason=RunStopReason.ErrorNonRetryable,
+        elapsed_ms=0,
+        notes="I1 no user message",
+    )
+
+
+def _loop_begin_iteration(
+    loop: "AgentLoop",
+    history: list[Message],
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+    elapsed_ms: int,
+) -> RunOutcome | None:
+    if loop.interrupt_flag:
+        return _loop_finalize(
+            emit,
+            counters,
+            text="",
+            reason=RunStopReason.Interrupted,
+            elapsed_ms=elapsed_ms,
+            notes="interrupt_flag",
+        )
+    if elapsed_ms > loop.config.max_wall_clock_ms:
+        return _loop_finalize(
+            emit,
+            counters,
+            text="",
+            reason=RunStopReason.BudgetWallClock,
+            elapsed_ms=elapsed_ms,
+            notes="wall clock exceeded",
+        )
+    counters.iterations += 1
+    counters.tool_calls_this_turn = 0
+    emit("iteration_started", iteration=counters.iterations, elapsed_ms=elapsed_ms)
+    if counters.iterations > loop.config.max_iterations:
+        return _loop_finalize(
+            emit,
+            counters,
+            text="",
+            reason=RunStopReason.BudgetIterations,
+            elapsed_ms=elapsed_ms,
+            notes="max iterations",
+        )
+    _maybe_request_reserved_finalization(loop, history, emit, counters)
+    return None
+
+
+def _record_assistant_turn(
+    loop: "AgentLoop",
+    history: list[Message],
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+    resp,
+) -> None:
+    counters.input_tokens += resp.input_tokens
+    counters.output_tokens += resp.output_tokens
+    loop._append(history, Message(role=Role.ASSISTANT, content=resp.text))
+    if resp.text.strip():
+        counters.consecutive_empty_turns = 0
+        emit("assistant_message", text=resp.text, has_tool_calls=bool(resp.tool_calls))
 
 
 class AgentLoop:
@@ -308,6 +525,10 @@ class AgentLoop:
         self.config = config
         self.policy = PermissionPolicy(config.permission_mode)
         self.session = session
+        self.interrupt_flag = False
+
+    def request_interrupt(self) -> None:
+        self.interrupt_flag = True
 
     def _append(self, history: list[Message], msg: Message):
         history.append(msg)
@@ -329,57 +550,31 @@ class AgentLoop:
         self._append(history, Message(role=Role.USER, content=user_input))
         emit("user_message", text=user_input)
         emit("run_started")
-
-        if not any(message.role == Role.USER for message in history):
-            return _loop_finalize(
-                emit,
-                counters,
-                text="",
-                reason=RunStopReason.ErrorNonRetryable,
-                elapsed_ms=0,
-                notes="I1 no user message",
-            )
+        invariant = _loop_user_invariant(emit, counters, history)
+        if invariant is not None:
+            return invariant
 
         while True:
             elapsed_ms = int((time.time() - started) * 1000)
-            if elapsed_ms > self.config.max_wall_clock_ms:
-                return _loop_finalize(
-                    emit,
-                    counters,
-                    text="",
-                    reason=RunStopReason.BudgetWallClock,
-                    elapsed_ms=elapsed_ms,
-                    notes="wall clock exceeded",
-                )
-
-            counters.iterations += 1
-            emit("iteration_started", iteration=counters.iterations, elapsed_ms=elapsed_ms)
-            if counters.iterations > self.config.max_iterations:
-                return _loop_finalize(
-                    emit,
-                    counters,
-                    text="",
-                    reason=RunStopReason.BudgetIterations,
-                    elapsed_ms=elapsed_ms,
-                    notes="max iterations",
-                )
+            pre = _loop_begin_iteration(self, history, emit, counters, elapsed_ms)
+            if pre is not None:
+                return pre
 
             resp, error_outcome = _loop_call_provider(self, history, emit, counters, elapsed_ms)
             if error_outcome is not None:
                 return error_outcome
 
-            counters.input_tokens += resp.input_tokens
-            counters.output_tokens += resp.output_tokens
-            self._append(history, Message(role=Role.ASSISTANT, content=resp.text))
-            if resp.text.strip():
-                counters.consecutive_empty_turns = 0
-                emit("assistant_message", text=resp.text)
+            _record_assistant_turn(self, history, emit, counters, resp)
 
             empty_outcome = _handle_empty_tool_calls(self, user_input, history, emit, counters, resp, elapsed_ms)
             if empty_outcome is CONTINUE_LOOP:
                 continue
             if empty_outcome is not None:
                 return empty_outcome
+
+            reserved = _reserved_finalization_reject(emit, counters, resp, elapsed_ms)
+            if reserved is not None:
+                return reserved
 
             tool_outcome = _loop_run_tool_calls(self, history, emit, counters, resp, elapsed_ms)
             if tool_outcome is not None:

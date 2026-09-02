@@ -935,7 +935,8 @@ class TitanTui(App[None]):
         self._refresh_status()
 
     def action_stop(self) -> None:
-        self._write_trace("stop requested (not yet wired to engine)")
+        self.harness.request_interrupt()
+        self._write_trace("stop requested")
 
     def action_handle_ctrl_c(self) -> None:
         if self.ui.pending:
