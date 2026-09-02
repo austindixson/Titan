@@ -13,6 +13,11 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Any, Callable
+
+from .types import Message, Role
+
+CONTINUE_LOOP = object()
 
 INTERNAL_NOTE_PREFIX = "Titan internal note:\n"
 
@@ -139,40 +144,68 @@ def extract_keep_paths(task: str) -> set[str]:
     return {p for p in found if p}
 
 
+def _quoted_token(raw: str) -> str:
+    """Strip quoting/whitespace from a path or package token."""
+    return _normalize_name(raw or "")
+
+
+def _add_source(sources: list[str], token: str) -> None:
+    name = _quoted_token(token)
+    if name:
+        sources.append(name)
+
+
+def _add_target(targets: set[str], token: str) -> None:
+    name = _quoted_token(token)
+    if name:
+        targets.add(name)
+        targets.add(_basename(name))
+
+
+def _collect_source_target_pairs(text: str) -> tuple[list[str], set[str]]:
+    sources: list[str] = []
+    targets: set[str] = set()
+    for pattern in (_RENAME, _MOVE):
+        for match in pattern.finditer(text):
+            _add_source(sources, match.group("source"))
+            _add_target(targets, match.group("target"))
+    return sources, targets
+
+
+def _collect_delete_sources(text: str) -> list[str]:
+    sources: list[str] = []
+    for match in _DELETE.finditer(text):
+        _add_source(sources, match.group("source"))
+    return sources
+
+
+def _excluded_leftover_source(source: str, keep: set[str], targets: set[str]) -> bool:
+    if not source:
+        return True
+    if source.lower() in _SKIP_NAMES:
+        return True
+    if source in keep:
+        return True
+    if source in targets:
+        return True
+    target_bases = {item.lower() for item in targets}
+    if _basename(source).lower() in target_bases:
+        return True
+    return is_allowlisted_name(source)
+
+
 def extract_leftover_names(task: str) -> list[str]:
     """Rename/move/delete sources from the task. Excludes targets, keep-paths, allowlist."""
     text = task or ""
     keep = extract_keep_paths(text)
-    sources: list[str] = []
-    targets: set[str] = set()
-
-    for pattern in (_RENAME, _MOVE):
-        for match in pattern.finditer(text):
-            source = _normalize_name(match.group("source"))
-            target = _normalize_name(match.group("target"))
-            if source:
-                sources.append(source)
-            if target:
-                targets.add(target)
-                targets.add(_basename(target))
-
-    for match in _DELETE.finditer(text):
-        source = _normalize_name(match.group("source"))
-        if source:
-            sources.append(source)
-
+    sources, targets = _collect_source_target_pairs(text)
+    sources.extend(_collect_delete_sources(text))
     leftovers: list[str] = []
     seen: set[str] = set()
     for source in sources:
-        if not source or source.lower() in _SKIP_NAMES:
-            continue
-        if source in keep or source in targets:
-            continue
-        if _basename(source).lower() in {t.lower() for t in targets}:
-            continue
-        if is_allowlisted_name(source):
-            continue
         if source in seen:
+            continue
+        if _excluded_leftover_source(source, keep, targets):
             continue
         seen.add(source)
         leftovers.append(source)
@@ -275,3 +308,22 @@ def leftover_user_note(leftovers: list[str]) -> str:
         "Do not stop; rename, move, or delete them first:\n"
         f"{listed}"
     )
+
+
+def leftover_block_note(
+    task: str,
+    append: Callable[[Message], None],
+    emit: Callable[..., Any] | None = None,
+    workspace: Path | None = None,
+) -> object | None:
+    """Inject a leftover user note when stop must be blocked.
+
+    Returns CONTINUE_LOOP so the caller continues the loop; None means stop is allowed.
+    """
+    leftovers = find_leftovers(task, workspace)
+    if not leftovers:
+        return None
+    append(Message(role=Role.USER, content=leftover_user_note(leftovers)))
+    if emit is not None:
+        emit("leftover_stop_blocked", leftovers=leftovers)
+    return CONTINUE_LOOP

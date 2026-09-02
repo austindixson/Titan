@@ -9,7 +9,7 @@ from typing import Any, Callable, Optional
 
 from .config import HarnessConfig
 from .image_paths import candidate_image_paths_from_text, local_image_references_from_text
-from .leftover import find_leftovers, leftover_user_note
+from .leftover import CONTINUE_LOOP, leftover_block_note
 from .loop import AgentEvent
 from .permissions import PermissionError, PermissionPolicy
 from .provider import Provider, ProviderError, retry_call
@@ -245,6 +245,24 @@ class IntentRouter:
         )
 
 
+@dataclass
+class _HarnessRun:
+    task: str
+    history: list[Message]
+    session: TitanSession
+    route_decision: RouteDecision
+    plan_budget: dict[str, Any]
+    plan_budget_text: str
+    image_paths: list[Path]
+    image_refs: list[str]
+    image_guidance_text: str
+    started: float
+    emit: Callable[..., None]
+    tool_calls_total: int = 0
+    tool_calls_this_turn: int = 0
+    budget_finalization_requested: bool = False
+
+
 class TitanHarness:
     def __init__(self, provider: Provider, tools: ToolRegistry, config: HarnessConfig, session_store: Optional[SessionStore] = None):
         self.provider = provider
@@ -259,7 +277,32 @@ class TitanHarness:
         self.recovery = RecoveryEngine()
         self.learning = LearningLoop()
 
-    def run_with_callback(self, task: str, history: list[Message], on_event: Optional[Callable[[AgentEvent], None]] = None) -> RunOutcome:
+    def _emit_harness(self, on_event: Optional[Callable[[AgentEvent], None]], event_type: str, **payload: Any) -> None:
+        self.event_bus.emit(event_type, payload)
+        if on_event:
+            on_event(AgentEvent(type=event_type, payload=payload))
+
+    def _assistant_final_outcome(self, run: _HarnessRun, text: str, notes: str) -> RunOutcome:
+        elapsed_ms = int((time.time() - run.started) * 1000)
+        return RunOutcome(
+            text=text,
+            stop=RunStopContract(
+                reason=RunStopReason.AssistantFinal,
+                iterations=run.session.turn,
+                tool_calls_total=run.tool_calls_total,
+                elapsed_ms=elapsed_ms,
+                notes=notes,
+            ),
+        )
+
+    def _maybe_distill_skill(self, run: _HarnessRun, resp) -> None:
+        if not _should_distill_skill(self.config, run.tool_calls_total, run.session.turn):
+            return
+        score = 1.0 if resp.text.strip() else 0.5
+        skill_path = self.learning.distill_skill(run.session.trace_id, run.session.trace, success_score=score)
+        run.emit("on_skill_created", path=str(skill_path))
+
+    def _start_harness_run(self, task: str, history: list[Message], on_event: Optional[Callable[[AgentEvent], None]]) -> _HarnessRun:
         trace_id = self.session_store.trace_id
         route_decision = self.router.decide(task)
         plan_budget = _iteration_budget_plan(self.config, route_decision)
@@ -270,251 +313,292 @@ class TitanHarness:
         session = TitanSession(goal=task, trace_id=trace_id, current_state=route_decision.state)
         self.session_store.checkpoint(session.current_state.value, 0, f"run_start:{route_decision.reason}")
         self._append(history, Message(role=Role.USER, content=task))
-        started = time.time()
-        tool_calls_total = 0
-        budget_finalization_requested = False
-
-        def emit(t: str, **payload: Any) -> None:
-            self.event_bus.emit(t, payload)
-            if on_event:
-                on_event(AgentEvent(type=t, payload=payload))
-
-        emit("route_decision", state=route_decision.state.value, reason=route_decision.reason, instruction=route_decision.instruction)
-        emit("plan_budget", **plan_budget)
+        run = _HarnessRun(
+            task=task,
+            history=history,
+            session=session,
+            route_decision=route_decision,
+            plan_budget=plan_budget,
+            plan_budget_text=plan_budget_text,
+            image_paths=image_paths,
+            image_refs=image_refs,
+            image_guidance_text=image_guidance_text,
+            started=time.time(),
+            emit=lambda event_type, **payload: self._emit_harness(on_event, event_type, **payload),
+        )
+        run.emit(
+            "route_decision",
+            state=route_decision.state.value,
+            reason=route_decision.reason,
+            instruction=route_decision.instruction,
+        )
+        run.emit("plan_budget", **plan_budget)
         if image_refs:
-            emit("image_attachments_detected", count=len(image_paths), paths=[str(path) for path in image_paths])
+            run.emit("image_attachments_detected", count=len(image_paths), paths=[str(path) for path in image_paths])
+        return run
 
-        while session.turn < self.config.max_iterations:
-            session.turn += 1
-            tool_calls_this_turn = 0
-            emit("on_state_enter", state=session.current_state.value, turn=session.turn)
-            remaining_iterations = self.config.max_iterations - session.turn + 1
-            if tool_calls_total > 0 and remaining_iterations <= 1 and not budget_finalization_requested:
-                budget_finalization_requested = True
-                session.current_state = OrchestratorState.FINALIZE
-                finalization_prompt = (
-                    "Titan is on the reserved finalization iteration. Do not call tools. "
-                    "Return a concise Summary and Next best step using the work already completed."
-                )
-                self._append(history, Message(role=Role.SYSTEM, content=finalization_prompt))
-                emit(
-                    "budget_finalization_requested",
-                    remaining_iterations=remaining_iterations,
-                    max_iterations=self.config.max_iterations,
-                    tool_calls_total=tool_calls_total,
-                )
-            context = self.memory.get_relevant_context(session.goal, session.context_budget)
-            session.trace.append({"turn": session.turn, "state": session.current_state.value, "context_len": len(context)})
-            tools = self.tools.definitions()
-            if image_refs:
-                tools = [tool for tool in tools if tool.get("function", {}).get("name") != "browser_navigate"]
-            emit(
-                "provider_request",
-                iteration=session.turn,
-                state=session.current_state.value,
-                model=self.config.model,
-                provider=self.config.provider,
-                tool_calls_total=tool_calls_total,
-                tool_calls_this_turn=tool_calls_this_turn,
+    def _begin_harness_turn(self, run: _HarnessRun) -> list[dict]:
+        run.tool_calls_this_turn = 0
+        session = run.session
+        run.emit("on_state_enter", state=session.current_state.value, turn=session.turn)
+        remaining_iterations = self.config.max_iterations - session.turn + 1
+        if run.tool_calls_total > 0 and remaining_iterations <= 1 and not run.budget_finalization_requested:
+            run.budget_finalization_requested = True
+            session.current_state = OrchestratorState.FINALIZE
+            finalization_prompt = (
+                "Titan is on the reserved finalization iteration. Do not call tools. "
+                "Return a concise Summary and Next best step using the work already completed."
+            )
+            self._append(run.history, Message(role=Role.SYSTEM, content=finalization_prompt))
+            run.emit(
+                "budget_finalization_requested",
+                remaining_iterations=remaining_iterations,
+                max_iterations=self.config.max_iterations,
+                tool_calls_total=run.tool_calls_total,
+            )
+        context = self.memory.get_relevant_context(session.goal, session.context_budget)
+        session.trace.append({"turn": session.turn, "state": session.current_state.value, "context_len": len(context)})
+        tools = self.tools.definitions()
+        if run.image_refs:
+            tools = self._without_browser_navigate(tools)
+        run.emit(
+            "provider_request",
+            iteration=session.turn,
+            state=session.current_state.value,
+            model=self.config.model,
+            provider=self.config.provider,
+            tool_calls_total=run.tool_calls_total,
+            tool_calls_this_turn=run.tool_calls_this_turn,
+        )
+        return tools
+
+    def _without_browser_navigate(self, tools: list[dict]) -> list[dict]:
+        filtered = []
+        for tool in tools:
+            name = (tool.get("function", {}) or {}).get("name")
+            if name == "browser_navigate":
+                continue
+            filtered.append(tool)
+        return filtered
+
+    def _generate_harness_turn(self, run: _HarnessRun, tools: list[dict]):
+        try:
+            resp = retry_call(
+                lambda: self.provider.generate_with_callback(
+                    self.config.model,
+                    self._provider_history(run.history, run.route_decision, run.plan_budget_text, run.image_guidance_text),
+                    tools,
+                    on_event=lambda event_type, **event_payload: run.emit(f"provider_{event_type}", **event_payload),
+                ),
+                self.config.retry,
+            )
+            return resp, None
+        except ProviderError as exc:
+            elapsed_ms = int((time.time() - run.started) * 1000)
+            reason = RunStopReason.ErrorRetryExhausted if exc.retryable else RunStopReason.ErrorNonRetryable
+            return None, RunOutcome(
+                text=f"Provider error: {exc}",
+                stop=RunStopContract(
+                    reason=reason,
+                    iterations=run.session.turn,
+                    tool_calls_total=run.tool_calls_total,
+                    elapsed_ms=elapsed_ms,
+                    notes=str(exc),
+                ),
             )
 
+    def _record_harness_assistant(self, run: _HarnessRun, resp) -> None:
+        self._append(run.history, Message(role=Role.ASSISTANT, content=resp.text))
+        if resp.text.strip():
+            run.emit(
+                "assistant_message",
+                text=resp.text,
+                state=run.session.current_state.value,
+                has_tool_calls=bool(resp.tool_calls),
+            )
+
+    def _finalize_text_response(self, run: _HarnessRun, resp):
+        blocked = leftover_block_note(run.task, lambda msg: self._append(run.history, msg), run.emit)
+        if blocked is not None:
+            return blocked
+        self._maybe_distill_skill(run, resp)
+        run.emit(
+            "on_transition",
+            from_state=run.session.current_state.value,
+            to_state=OrchestratorState.FINALIZE.value,
+            turn=run.session.turn,
+        )
+        run.emit("on_state_exit", state=run.session.current_state.value, turn=run.session.turn)
+        run.session.current_state = OrchestratorState.FINALIZE
+        self.session_store.checkpoint(run.session.current_state.value, run.session.turn, "finalize")
+        return self._assistant_final_outcome(run, resp.text, notes=f"trace_id={run.session.trace_id}")
+
+    def _reserved_finalization_stop(self, run: _HarnessRun, resp):
+        if not run.budget_finalization_requested:
+            return None
+        text = resp.text.strip() or (
+            "Summary:\n"
+            "- Stopped cleanly on the reserved finalization pass before taking more tool actions.\n\n"
+            "Next best step:\n"
+            "- Continue the task with a fresh iteration budget."
+        )
+        run.emit("tool_batch_rejected", count=len(resp.tool_calls), reason="reserved_finalization_iteration")
+        run.emit(
+            "on_transition",
+            from_state=run.session.current_state.value,
+            to_state=OrchestratorState.FINALIZE.value,
+            turn=run.session.turn,
+        )
+        run.emit("on_state_exit", state=run.session.current_state.value, turn=run.session.turn)
+        self.session_store.checkpoint(OrchestratorState.FINALIZE.value, run.session.turn, "reserved_finalization")
+        return self._assistant_final_outcome(
+            run,
+            text,
+            notes=f"trace_id={run.session.trace_id}; reserved_finalization_iteration",
+        )
+
+    def _tool_cap_stop(self, run: _HarnessRun, resp):
+        if len(resp.tool_calls) <= self.config.max_tool_calls_per_iteration:
+            return None
+        run.emit(
+            "tool_batch_rejected",
+            count=len(resp.tool_calls),
+            max_tool_calls_per_iteration=self.config.max_tool_calls_per_iteration,
+        )
+        for index, tool_call in enumerate(resp.tool_calls, start=1):
+            run.emit(
+                "tool_call_rejected",
+                id=tool_call.id,
+                name=tool_call.name,
+                arguments=tool_call.arguments,
+                index=index,
+                count=len(resp.tool_calls),
+                reason="max_tool_calls_per_iteration",
+            )
+        elapsed_ms = int((time.time() - run.started) * 1000)
+        return RunOutcome(
+            text="",
+            stop=RunStopContract(
+                reason=RunStopReason.BudgetToolsIteration,
+                iterations=run.session.turn,
+                tool_calls_total=run.tool_calls_total,
+                elapsed_ms=elapsed_ms,
+                notes="tool calls per iteration exceeded",
+            ),
+        )
+
+    def _execute_tool_batch(self, run: _HarnessRun, resp) -> list[ToolResult]:
+        results: list[ToolResult] = []
+        run.emit("tool_batch_started", count=len(resp.tool_calls))
+        for tool_call in resp.tool_calls:
+            run.tool_calls_total += 1
+            run.tool_calls_this_turn += 1
+            run.emit(
+                "tool_call",
+                id=tool_call.id,
+                name=tool_call.name,
+                arguments=tool_call.arguments,
+                count=run.tool_calls_total,
+                tool_calls_total=run.tool_calls_total,
+                tool_calls_this_turn=run.tool_calls_this_turn,
+            )
             try:
-                resp = retry_call(
-                    lambda: self.provider.generate_with_callback(
-                        self.config.model,
-                        self._provider_history(history, route_decision, plan_budget_text, image_guidance_text),
-                        tools,
-                        on_event=lambda event_type, **event_payload: emit(f"provider_{event_type}", **event_payload),
-                    ),
-                    self.config.retry,
-                )
-            except ProviderError as e:
-                elapsed_ms = int((time.time() - started) * 1000)
-                return RunOutcome(
-                    text=f"Provider error: {e}",
-                    stop=RunStopContract(
-                        reason=RunStopReason.ErrorRetryExhausted if e.retryable else RunStopReason.ErrorNonRetryable,
-                        iterations=session.turn,
-                        tool_calls_total=tool_calls_total,
-                        elapsed_ms=elapsed_ms,
-                        notes=str(e),
-                    ),
-                )
-
-            self._append(history, Message(role=Role.ASSISTANT, content=resp.text))
-            if resp.text.strip():
-                emit(
-                    "assistant_message",
-                    text=resp.text,
-                    state=session.current_state.value,
-                    has_tool_calls=bool(resp.tool_calls),
-                )
-
-            if not resp.tool_calls:
-                leftovers = find_leftovers(task)
-                if leftovers:
-                    self._append(history, Message(role=Role.USER, content=leftover_user_note(leftovers)))
-                    emit("leftover_stop_blocked", leftovers=leftovers)
-                    continue
-
-                elapsed_ms = int((time.time() - started) * 1000)
-                if _should_distill_skill(self.config, tool_calls_total, session.turn):
-                    skill_path = self.learning.distill_skill(trace_id, session.trace, success_score=1.0 if resp.text.strip() else 0.5)
-                    emit("on_skill_created", path=str(skill_path))
-                emit("on_transition", from_state=session.current_state.value, to_state=OrchestratorState.FINALIZE.value, turn=session.turn)
-                emit("on_state_exit", state=session.current_state.value, turn=session.turn)
-                session.current_state = OrchestratorState.FINALIZE
-                self.session_store.checkpoint(session.current_state.value, session.turn, "finalize")
-                return RunOutcome(
-                    text=resp.text,
-                    stop=RunStopContract(
-                        reason=RunStopReason.AssistantFinal,
-                        iterations=session.turn,
-                        tool_calls_total=tool_calls_total,
-                        elapsed_ms=elapsed_ms,
-                        notes=f"trace_id={trace_id}",
-                    ),
-                )
-
-            results: list[ToolResult] = []
-            if resp.tool_calls:
-                if budget_finalization_requested:
-                    elapsed_ms = int((time.time() - started) * 1000)
-                    text = resp.text.strip() or (
-                        "Summary:\n"
-                        "- Stopped cleanly on the reserved finalization pass before taking more tool actions.\n\n"
-                        "Next best step:\n"
-                        "- Continue the task with a fresh iteration budget."
-                    )
-                    emit("tool_batch_rejected", count=len(resp.tool_calls), reason="reserved_finalization_iteration")
-                    emit("on_transition", from_state=session.current_state.value, to_state=OrchestratorState.FINALIZE.value, turn=session.turn)
-                    emit("on_state_exit", state=session.current_state.value, turn=session.turn)
-                    self.session_store.checkpoint(OrchestratorState.FINALIZE.value, session.turn, "reserved_finalization")
-                    return RunOutcome(
-                        text=text,
-                        stop=RunStopContract(
-                            reason=RunStopReason.AssistantFinal,
-                            iterations=session.turn,
-                            tool_calls_total=tool_calls_total,
-                            elapsed_ms=elapsed_ms,
-                            notes=f"trace_id={trace_id}; reserved_finalization_iteration",
-                        ),
-                    )
-                if len(resp.tool_calls) > self.config.max_tool_calls_per_iteration:
-                    emit(
-                        "tool_batch_rejected",
-                        count=len(resp.tool_calls),
-                        max_tool_calls_per_iteration=self.config.max_tool_calls_per_iteration,
-                    )
-                    for index, tc in enumerate(resp.tool_calls, start=1):
-                        emit(
-                            "tool_call_rejected",
-                            id=tc.id,
-                            name=tc.name,
-                            arguments=tc.arguments,
-                            index=index,
-                            count=len(resp.tool_calls),
-                            reason="max_tool_calls_per_iteration",
-                        )
-                    elapsed_ms = int((time.time() - started) * 1000)
-                    return RunOutcome(
-                        text="",
-                        stop=RunStopContract(
-                            reason=RunStopReason.BudgetToolsIteration,
-                            iterations=session.turn,
-                            tool_calls_total=tool_calls_total,
-                            elapsed_ms=elapsed_ms,
-                            notes="tool calls per iteration exceeded",
-                        ),
-                    )
-
-                emit("tool_batch_started", count=len(resp.tool_calls))
-                for tc in resp.tool_calls:
-                    tool_calls_total += 1
-                    tool_calls_this_turn += 1
-                    emit(
-                        "tool_call",
-                        id=tc.id,
-                        name=tc.name,
-                        arguments=tc.arguments,
-                        count=tool_calls_total,
-                        tool_calls_total=tool_calls_total,
-                        tool_calls_this_turn=tool_calls_this_turn,
-                    )
-                    try:
-                        self.policy.authorize(tc.name)
-                        tr = self.tools.execute(tc.id, tc.name, tc.arguments)
-                    except PermissionError as e:
-                        tr = ToolResult(call_id=tc.id, tool_name=tc.name, content=str(e), is_error=True)
-                    self._append(history, Message(role=Role.TOOL, content=tr.content, tool_call_id=tr.call_id, tool_name=tr.tool_name, is_error=tr.is_error))
-                    results.append(tr)
-                    emit(
-                        "tool_result",
-                        id=tr.call_id,
-                        name=tr.tool_name,
-                        is_error=tr.is_error,
-                        content=tr.content,
-                        tool_calls_total=tool_calls_total,
-                        tool_calls_this_turn=tool_calls_this_turn,
-                    )
-
-                self.memory.add_tool_results(results)
-
-            failures = [r for r in results if r.is_error]
-            next_state = self.supervisor.decide_next_state(
-                session.current_state,
-                has_tools=bool(resp.tool_calls),
-                has_failures=bool(failures),
-                final_text=resp.text,
+                self.policy.authorize(tool_call.name)
+                result = self.tools.execute(tool_call.id, tool_call.name, tool_call.arguments)
+            except PermissionError as exc:
+                result = ToolResult(call_id=tool_call.id, tool_name=tool_call.name, content=str(exc), is_error=True)
+            self._append(
+                run.history,
+                Message(
+                    role=Role.TOOL,
+                    content=result.content,
+                    tool_call_id=result.call_id,
+                    tool_name=result.tool_name,
+                    is_error=result.is_error,
+                ),
             )
+            results.append(result)
+            run.emit(
+                "tool_result",
+                id=result.call_id,
+                name=result.tool_name,
+                is_error=result.is_error,
+                content=result.content,
+                tool_calls_total=run.tool_calls_total,
+                tool_calls_this_turn=run.tool_calls_this_turn,
+            )
+        self.memory.add_tool_results(results)
+        return results
 
-            if failures:
-                session.recovery_count += 1
-                next_state = self.recovery.classify(failures, session.recovery_count)
+    def _finalize_orchestrator_state(self, run: _HarnessRun, resp):
+        blocked = leftover_block_note(run.task, lambda msg: self._append(run.history, msg), run.emit)
+        if blocked is not None:
+            run.session.current_state = OrchestratorState.ACT
+            return blocked
+        self.session_store.checkpoint(run.session.current_state.value, run.session.turn, "finalize")
+        return self._assistant_final_outcome(run, resp.text, notes=f"trace_id={run.session.trace_id}")
 
-            emit("on_transition", from_state=session.current_state.value, to_state=next_state.value, turn=session.turn)
-            emit("on_state_exit", state=session.current_state.value, turn=session.turn)
-            session.current_state = next_state
+    def _advance_after_tools(self, run: _HarnessRun, resp, results: list[ToolResult]):
+        failures = [result for result in results if result.is_error]
+        next_state = self.supervisor.decide_next_state(
+            run.session.current_state,
+            has_tools=bool(resp.tool_calls),
+            has_failures=bool(failures),
+            final_text=resp.text,
+        )
+        if failures:
+            run.session.recovery_count += 1
+            next_state = self.recovery.classify(failures, run.session.recovery_count)
+        run.emit("on_transition", from_state=run.session.current_state.value, to_state=next_state.value, turn=run.session.turn)
+        run.emit("on_state_exit", state=run.session.current_state.value, turn=run.session.turn)
+        run.session.current_state = next_state
+        if run.session.turn % 5 == 0:
+            self.session_store.checkpoint(run.session.current_state.value, run.session.turn, "periodic")
+        self._maybe_distill_skill(run, resp)
+        if run.session.current_state == OrchestratorState.FINALIZE:
+            return self._finalize_orchestrator_state(run, resp)
+        return None
 
-            if session.turn % 5 == 0:
-                self.session_store.checkpoint(session.current_state.value, session.turn, "periodic")
+    def _process_harness_response(self, run: _HarnessRun, resp):
+        if not resp.tool_calls:
+            return self._finalize_text_response(run, resp)
+        reserved = self._reserved_finalization_stop(run, resp)
+        if reserved is not None:
+            return reserved
+        capped = self._tool_cap_stop(run, resp)
+        if capped is not None:
+            return capped
+        results = self._execute_tool_batch(run, resp)
+        return self._advance_after_tools(run, resp, results)
 
-            if _should_distill_skill(self.config, tool_calls_total, session.turn):
-                skill_path = self.learning.distill_skill(trace_id, session.trace, success_score=1.0 if resp.text.strip() else 0.5)
-                emit("on_skill_created", path=str(skill_path))
-
-            if session.current_state == OrchestratorState.FINALIZE:
-                leftovers = find_leftovers(task)
-                if leftovers:
-                    self._append(history, Message(role=Role.USER, content=leftover_user_note(leftovers)))
-                    emit("leftover_stop_blocked", leftovers=leftovers)
-                    session.current_state = OrchestratorState.ACT
-                    continue
-
-                elapsed_ms = int((time.time() - started) * 1000)
-                self.session_store.checkpoint(session.current_state.value, session.turn, "finalize")
-                return RunOutcome(
-                    text=resp.text,
-                    stop=RunStopContract(
-                        reason=RunStopReason.AssistantFinal,
-                        iterations=session.turn,
-                        tool_calls_total=tool_calls_total,
-                        elapsed_ms=elapsed_ms,
-                        notes=f"trace_id={trace_id}",
-                    ),
-                )
-
-        elapsed_ms = int((time.time() - started) * 1000)
+    def _budget_iterations_outcome(self, run: _HarnessRun) -> RunOutcome:
+        elapsed_ms = int((time.time() - run.started) * 1000)
         return RunOutcome(
             text="",
             stop=RunStopContract(
                 reason=RunStopReason.BudgetIterations,
-                iterations=session.turn,
-                tool_calls_total=tool_calls_total,
+                iterations=run.session.turn,
+                tool_calls_total=run.tool_calls_total,
                 elapsed_ms=elapsed_ms,
                 notes="max_iterations",
             ),
         )
+
+    def run_with_callback(self, task: str, history: list[Message], on_event: Optional[Callable[[AgentEvent], None]] = None) -> RunOutcome:
+        run = self._start_harness_run(task, history, on_event)
+        while run.session.turn < self.config.max_iterations:
+            run.session.turn += 1
+            tools = self._begin_harness_turn(run)
+            resp, error_outcome = self._generate_harness_turn(run, tools)
+            if error_outcome is not None:
+                return error_outcome
+            self._record_harness_assistant(run, resp)
+            outcome = self._process_harness_response(run, resp)
+            if outcome is CONTINUE_LOOP:
+                continue
+            if outcome is not None:
+                return outcome
+        return self._budget_iterations_outcome(run)
 
     def _provider_history(
         self,
