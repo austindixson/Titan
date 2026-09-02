@@ -315,7 +315,7 @@ def test_recovery_keeps_usage_dict_on_recovery_exhausted(tmp_path):
     assert out.usage["output_tokens"] == 3
 
 
-def test_recovery_prompt_is_added_as_system_and_user_messages(tmp_path):
+def test_recovery_prompt_is_user_internal_note(tmp_path):
     cfg = HarnessConfig(max_iterations=6, max_consecutive_empty_turns=2)
     provider = MockProvider(script=[
         AssistantResponse(text="", tool_calls=[ToolCall(id="c1", name="shell", arguments={"command": "echo x"})]),
@@ -325,9 +325,12 @@ def test_recovery_prompt_is_added_as_system_and_user_messages(tmp_path):
     loop = AgentLoop(provider, default_registry(), cfg, SessionStore(str(tmp_path / "s2u.jsonl")))
     hist = [Message(role=Role.SYSTEM, content="sys")]
     loop.run("do", hist)
-    roles_and_content = [(m.role, m.content) for m in hist if m.content]
-    assert any(role == Role.SYSTEM and "Recovery attempt after an empty assistant turn" in content for role, content in roles_and_content)
-    assert any(role == Role.USER and "Continue and finish the task" in content for role, content in roles_and_content)
+    system_messages = [m for m in hist if m.role == Role.SYSTEM]
+    notes = [m for m in hist if m.role == Role.USER and m.content.startswith("Titan internal note:")]
+    assert len(system_messages) == 1
+    assert notes
+    assert "Recovery attempt after an empty assistant turn" in notes[0].content
+    assert "Continue and finish the task" in notes[0].content
 
 
 def test_recovery_occurs_only_after_tools(tmp_path):
@@ -442,3 +445,12 @@ def test_tool_cap_hits(tmp_path):
     hist = [Message(role=Role.SYSTEM, content="sys")]
     out = loop.run("do", hist)
     assert out.stop.reason == RunStopReason.BudgetToolsIteration
+
+
+def test_interrupt_flag_stops_before_provider(tmp_path):
+    provider = MockProvider(script=[AssistantResponse(text="should not run")])
+    loop = AgentLoop(provider, default_registry(), HarnessConfig(), SessionStore(str(tmp_path / "s-int.jsonl")))
+    loop.request_interrupt()
+    out = loop.run("do", [Message(role=Role.SYSTEM, content="sys")])
+    assert out.stop.reason == RunStopReason.Interrupted
+    assert provider.idx == 0

@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 
 from titan.config import HarnessConfig
-from titan.titan import TitanHarness, OrchestratorState, RecoveryEngine
+from titan.loop import AgentLoop
+from titan.titan import TITAN_SYSTEM_PROMPT, TitanHarness, OrchestratorState, RecoveryEngine
 from titan.mock_provider import MockProvider
 from titan.provider import Provider
 from titan.session import SessionStore
@@ -159,7 +161,7 @@ def test_titan_harness_blocks_browser_for_missing_local_image_reference(tmp_path
     assert "browser_navigate" not in tool_names
 
 
-def test_titan_harness_routes_delegation_requests_to_delegate_mode(tmp_path: Path):
+def test_titan_harness_routes_delegation_requests_to_plan_in_process(tmp_path: Path):
     provider = CapturingProvider(AssistantResponse(text="I will split this into workers."))
     harness = TitanHarness(
         provider=provider,
@@ -175,8 +177,10 @@ def test_titan_harness_routes_delegation_requests_to_delegate_mode(tmp_path: Pat
         on_event=lambda e: events.append((e.type, e.payload)),
     )
 
-    assert [p["state"] for t, p in events if t == "route_decision"] == [OrchestratorState.DELEGATE.value]
-    assert "use delegate_task" in provider.calls[0][0].content
+    assert [p["state"] for t, p in events if t == "route_decision"] == [OrchestratorState.PLAN.value]
+    system_prompt = provider.calls[0][0].content
+    assert "delegate_task" not in system_prompt
+    assert "in-process" in system_prompt
 
 
 def test_titan_harness_injects_iteration_budgeted_phase_plan_for_work_tasks(tmp_path: Path):
@@ -433,3 +437,97 @@ def test_titan_harness_enforces_per_iteration_tool_cap(tmp_path: Path):
     assert [payload["name"] for payload in rejected] == ["shell", "shell"]
     assert rejected[0]["arguments"] == {"command": "echo should-not-run-1"}
     assert rejected[1]["arguments"] == {"command": "echo should-not-run-2"}
+
+
+def _session_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_harness_session_jsonl_has_one_user_task_row(tmp_path: Path):
+    session_path = tmp_path / "session.jsonl"
+    harness = TitanHarness(
+        provider=MockProvider(script=[AssistantResponse(text="Hi!")]),
+        tools=default_registry(),
+        config=HarnessConfig(permission_mode="allow"),
+        session_store=SessionStore(str(session_path)),
+    )
+
+    out = harness.run_with_callback("say hi once", [Message(role=Role.SYSTEM, content=TITAN_SYSTEM_PROMPT)])
+
+    assert out.stop.reason == RunStopReason.AssistantFinal
+    user_task_rows = [
+        row
+        for row in _session_rows(session_path)
+        if row.get("role") == "user" and not str(row.get("content", "")).startswith("Titan internal note:")
+    ]
+    assert len(user_task_rows) == 1
+    assert user_task_rows[0]["content"] == "say hi once"
+    system_rows = [row for row in _session_rows(session_path) if row.get("role") == "system"]
+    assert system_rows == []
+
+
+def test_harness_and_engine_share_stop_contracts_on_product_path(tmp_path: Path):
+    script = [
+        AssistantResponse(text="", tool_calls=[ToolCall(id="c1", name="shell", arguments={"command": "echo hi"})]),
+        AssistantResponse(text="final answer"),
+    ]
+    harness = TitanHarness(
+        provider=MockProvider(script=list(script)),
+        tools=default_registry(),
+        config=HarnessConfig(permission_mode="allow"),
+        session_store=SessionStore(str(tmp_path / "harness.jsonl")),
+    )
+    engine = AgentLoop(
+        provider=MockProvider(script=list(script)),
+        tools=default_registry(),
+        config=HarnessConfig(permission_mode="allow"),
+        session=SessionStore(str(tmp_path / "engine.jsonl")),
+    )
+
+    harness_out = harness.run_with_callback("task", [Message(role=Role.SYSTEM, content="s")])
+    engine_out = engine.run("task", [Message(role=Role.SYSTEM, content="s")])
+
+    assert harness_out.stop.reason == engine_out.stop.reason == RunStopReason.AssistantFinal
+    assert harness_out.stop.iterations == engine_out.stop.iterations == 2
+    assert harness_out.stop.tool_calls_total == engine_out.stop.tool_calls_total == 1
+
+
+def test_harness_interrupt_flag_stops_before_provider(tmp_path: Path):
+    provider = MockProvider(script=[AssistantResponse(text="should not run")])
+    harness = TitanHarness(
+        provider=provider,
+        tools=default_registry(),
+        config=HarnessConfig(permission_mode="allow"),
+        session_store=SessionStore(str(tmp_path / "session.jsonl")),
+    )
+    harness.request_interrupt()
+
+    out = harness.run_with_callback("hi", [Message(role=Role.SYSTEM, content="s")])
+
+    assert out.stop.reason == RunStopReason.Interrupted
+    assert provider.idx == 0
+
+
+def test_reserved_finalization_is_user_internal_note(tmp_path: Path):
+    script = [
+        AssistantResponse(text="Inspecting", tool_calls=[ToolCall(id="c1", name="shell", arguments={"command": "echo inspect"})]),
+        AssistantResponse(text="Fixing", tool_calls=[ToolCall(id="c2", name="shell", arguments={"command": "echo fix"})]),
+        AssistantResponse(text="Summary:\n- Partial work completed.\n\nNext best step:\n- Continue verification."),
+    ]
+    harness = TitanHarness(
+        provider=MockProvider(script=script),
+        tools=default_registry(),
+        config=HarnessConfig(permission_mode="allow", max_iterations=3),
+        session_store=SessionStore(str(tmp_path / "session.jsonl")),
+    )
+    history = [Message(role=Role.SYSTEM, content="s")]
+
+    out = harness.run_with_callback("fix a medium coding task", history)
+
+    assert out.stop.reason == RunStopReason.AssistantFinal
+    notes = [m for m in history if m.role == Role.USER and m.content.startswith("Titan internal note:")]
+    assert notes
+    assert "reserved finalization iteration" in notes[0].content
+    assert sum(1 for m in history if m.role == Role.SYSTEM) == 1
