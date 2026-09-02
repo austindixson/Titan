@@ -12,19 +12,20 @@ class Role(str, Enum):
 
 
 @dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
 class Message:
     role: Role
     content: str = ""
     tool_call_id: Optional[str] = None
     tool_name: Optional[str] = None
     is_error: bool = False
-
-
-@dataclass
-class ToolCall:
-    id: str
-    name: str
-    arguments: dict[str, Any]
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 @dataclass

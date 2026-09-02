@@ -10,7 +10,8 @@ from .permissions import PermissionError, PermissionPolicy
 from .provider import Provider, ProviderError, retry_call
 from .session import SessionStore
 from .tools import ToolRegistry
-from .types import Message, Role, RunOutcome, RunStopContract, RunStopReason, ToolResult
+from .types import Message, Role, RunOutcome, RunStopContract, RunStopReason, ToolCall, ToolResult
+from .verify import maybe_verify_after_edit
 from .image_paths import candidate_image_paths_from_text, local_image_references_from_text
 
 
@@ -344,6 +345,37 @@ def _execute_authorized_tool(loop: "AgentLoop", tool_call) -> ToolResult:
         return ToolResult(call_id=tool_call.id, tool_name=tool_call.name, content=str(exc), is_error=True)
 
 
+def _append_tool_result(loop: "AgentLoop", history: list[Message], result: ToolResult) -> None:
+    loop._append(
+        history,
+        Message(
+            role=Role.TOOL,
+            content=result.content,
+            tool_call_id=result.call_id,
+            tool_name=result.tool_name,
+            is_error=result.is_error,
+        ),
+    )
+
+
+def _loop_verify_after_batch(
+    loop: "AgentLoop",
+    history: list[Message],
+    emit: Callable[..., None],
+    counters: _LoopCounters,
+    executed: list[tuple[ToolCall, ToolResult]],
+) -> None:
+    maybe_verify_after_edit(
+        reserved_finalization=counters.budget_finalization_requested,
+        last_iteration=counters.iterations >= loop.config.max_iterations,
+        cwd=loop.tools.cwd,
+        executed=executed,
+        execute=loop.tools.execute,
+        append=lambda msg: loop._append(history, msg),
+        emit=emit,
+    )
+
+
 def _loop_run_tool_calls(
     loop: "AgentLoop",
     history: list[Message],
@@ -359,6 +391,7 @@ def _loop_run_tool_calls(
 
     counters.had_tools = True
     emit("tool_batch_started", count=len(resp.tool_calls))
+    executed: list[tuple[ToolCall, ToolResult]] = []
     for tool_call in resp.tool_calls:
         counters.tool_calls_total += 1
         counters.tool_calls_this_turn += 1
@@ -381,16 +414,7 @@ def _loop_run_tool_calls(
                 notes="tool calls total exceeded",
             )
         result = _execute_authorized_tool(loop, tool_call)
-        loop._append(
-            history,
-            Message(
-                role=Role.TOOL,
-                content=result.content,
-                tool_call_id=result.call_id,
-                tool_name=result.tool_name,
-                is_error=result.is_error,
-            ),
-        )
+        _append_tool_result(loop, history, result)
         emit(
             "tool_result",
             id=result.call_id,
@@ -400,6 +424,8 @@ def _loop_run_tool_calls(
             tool_calls_total=counters.tool_calls_total,
             tool_calls_this_turn=counters.tool_calls_this_turn,
         )
+        executed.append((tool_call, result))
+    _loop_verify_after_batch(loop, history, emit, counters, executed)
     return None
 
 
@@ -512,7 +538,7 @@ def _record_assistant_turn(
 ) -> None:
     counters.input_tokens += resp.input_tokens
     counters.output_tokens += resp.output_tokens
-    loop._append(history, Message(role=Role.ASSISTANT, content=resp.text))
+    loop._append(history, Message(role=Role.ASSISTANT, content=resp.text, tool_calls=list(resp.tool_calls)))
     if resp.text.strip():
         counters.consecutive_empty_turns = 0
         emit("assistant_message", text=resp.text, has_tool_calls=bool(resp.tool_calls))

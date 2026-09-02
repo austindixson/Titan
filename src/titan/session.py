@@ -6,6 +6,15 @@ from pathlib import Path
 from .types import Message
 
 
+def _tool_calls_row(msg: Message) -> list[dict] | None:
+    if not msg.tool_calls:
+        return None
+    return [
+        {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+        for tc in msg.tool_calls
+    ]
+
+
 class SessionStore:
     def __init__(self, path: str):
         self.path = Path(path)
@@ -23,6 +32,9 @@ class SessionStore:
             "tool_name": msg.tool_name,
             "is_error": msg.is_error,
         }
+        tool_calls = _tool_calls_row(msg)
+        if tool_calls is not None:
+            row["tool_calls"] = tool_calls
         with self.path.open("a") as f:
             f.write(json.dumps(row) + "\n")
 
