@@ -1,7 +1,14 @@
 import json
 from urllib import error
 
-from titan.provider import OpenAICompatProvider, ProviderError, build_provider_from_config
+from titan.provider import (
+    LOCAL_INFERENCE_READ_TIMEOUT_S,
+    OpenAICompatProvider,
+    ProviderError,
+    build_provider_from_config,
+    inference_read_timeout_s,
+    is_local_inference_base,
+)
 from titan.config import HarnessConfig
 from titan.types import Message, Role
 
@@ -34,6 +41,32 @@ class _StreamingResponse:
 
     def __iter__(self):
         return iter(self.lines)
+
+
+def test_local_inference_host_detection_and_timeout():
+    assert is_local_inference_base("http://ghost32:9379/v1") is True
+    assert is_local_inference_base("http://127.0.0.1:11434/v1") is True
+    assert is_local_inference_base("https://api.openai.com/v1") is False
+    assert inference_read_timeout_s("http://ghost32:9379/v1") == LOCAL_INFERENCE_READ_TIMEOUT_S
+    assert inference_read_timeout_s("https://api.openai.com/v1") == 90.0
+
+
+def test_local_chat_completion_timeout_is_not_retryable(monkeypatch):
+    provider = OpenAICompatProvider(api_base="http://ghost32:9379/v1", api_key="local")
+    captured = {}
+
+    def _boom(*args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("titan.provider.request.urlopen", _boom)
+
+    try:
+        provider.generate("gemma4-12b", [Message(role=Role.USER, content="hi")], [])
+        assert False, "expected ProviderError"
+    except ProviderError as e:
+        assert e.retryable is False
+        assert captured["timeout"] == LOCAL_INFERENCE_READ_TIMEOUT_S
 
 
 def test_chat_completion_timeout_is_retryable(monkeypatch):
@@ -94,7 +127,16 @@ def test_chat_completion_streaming_emits_deltas_and_final_text(monkeypatch):
     ]
     seen = []
 
-    monkeypatch.setattr("titan.provider.request.urlopen", lambda *args, **kwargs: _StreamingResponse(events))
+    captured = {}
+
+    def _open(*args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        req = args[0] if args else kwargs.get("req")
+        raw = kwargs.get("data") or getattr(req, "data", None) or b"{}"
+        captured["body"] = json.loads(raw.decode())
+        return _StreamingResponse(events)
+
+    monkeypatch.setattr("titan.provider.request.urlopen", _open)
     out = provider.generate_with_callback(
         "gpt",
         [Message(role=Role.USER, content="hi")],
@@ -104,6 +146,9 @@ def test_chat_completion_streaming_emits_deltas_and_final_text(monkeypatch):
 
     assert out.text == "Hello"
     assert [(t, p["text"]) for t, p in seen] == [("stream_delta", "Hel"), ("stream_delta", "lo")]
+    assert captured["body"]["stream"] is True
+    assert captured["body"]["stream_options"] == {"include_usage": True}
+    assert captured["timeout"] == 90.0
 
 
 def test_codex_completed_event_text_not_duplicated(monkeypatch):

@@ -391,7 +391,7 @@ class TitanTui(App[None]):
         self.query_one("#input", ComposerTextArea).focus()
         self._apply_responsive_layout(self.size.width)
         self._refresh_status()
-        self.set_interval(0.2, self._tick)
+        self.set_interval(0.05, self._tick)
 
     def on_resize(self) -> None:
         self._apply_responsive_layout(self.size.width)

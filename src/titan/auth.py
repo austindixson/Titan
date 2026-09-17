@@ -64,6 +64,11 @@ _OPENAI_COMPAT_PROVIDER_SPECS: dict[str, dict[str, str]] = {
         "base_url_env": "MOONSHOT_BASE_URL",
         "default_base_url": "https://api.moonshot.ai/v1",
     },
+    "litert": {
+        "api_key_env": "LITERT_API_KEY",
+        "base_url_env": "LITERT_BASE_URL",
+        "default_base_url": "http://ghost32:9379/v1",
+    },
 }
 
 

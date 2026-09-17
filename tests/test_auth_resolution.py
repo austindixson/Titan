@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from titan.auth import resolve_openai_credentials
+from titan.auth import provider_default_base_url, resolve_openai_credentials, supported_openai_compat_providers
 
 
 def test_resolve_from_env(monkeypatch):
@@ -33,3 +33,8 @@ def test_resolve_from_hermes_auth_file(monkeypatch, tmp_path: Path):
     assert creds.token == "tok_hermes"
     assert creds.base_url == "https://chatgpt.com/backend-api/codex"
     assert creds.source.startswith("hermes:")
+
+
+def test_litert_is_a_supported_openai_compat_provider():
+    assert "litert" in supported_openai_compat_providers()
+    assert provider_default_base_url("litert") == "http://ghost32:9379/v1"

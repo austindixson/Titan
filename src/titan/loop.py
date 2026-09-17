@@ -7,9 +7,9 @@ from typing import Any, Callable, Optional
 from .config import HarnessConfig
 from .leftover import CONTINUE_LOOP, INTERNAL_NOTE_PREFIX, leftover_block_note
 from .permissions import PermissionError, PermissionPolicy
-from .provider import Provider, ProviderError, retry_call
+from .provider import Provider, ProviderError, is_local_inference_base, retry_call
 from .session import SessionStore
-from .tools import ToolRegistry
+from .tools import CODING_HOT_TOOLS, ToolRegistry
 from .types import Message, Role, RunOutcome, RunStopContract, RunStopReason, ToolCall, ToolResult
 from .verify import maybe_verify_after_edit
 from .image_paths import candidate_image_paths_from_text, local_image_references_from_text
@@ -251,7 +251,7 @@ def _loop_call_provider(
     elapsed_ms: int,
 ):
     try:
-        tool_defs = _tool_defs_for_history(loop.tools.definitions(), history, emit)
+        tool_defs = _tool_defs_for_history(loop.tools.definitions(loop._tool_schema_names()), history, emit)
         emit(
             "provider_request",
             iteration=counters.iterations,
@@ -555,6 +555,13 @@ class AgentLoop:
 
     def request_interrupt(self) -> None:
         self.interrupt_flag = True
+
+    def _tool_schema_names(self) -> tuple[str, ...] | None:
+        provider = str(self.config.provider or "").strip().lower()
+        base = (self.config.api_base or "").strip()
+        if provider == "litert" or is_local_inference_base(base):
+            return CODING_HOT_TOOLS
+        return None
 
     def _append(self, history: list[Message], msg: Message):
         history.append(msg)

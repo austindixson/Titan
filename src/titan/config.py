@@ -187,6 +187,11 @@ def load_harness_config(
     if model_override:
         cfg.model = model_override
 
+    # Local engines cannot overlap generations. A timed-out retry while the
+    # previous decode is still running is the fastest way to destroy TTFT.
+    if cfg.provider == "litert" and not isinstance(_deep_get(data, "retry", None), dict):
+        cfg.retry.max_retries = 0
+
     return cfg
 
 

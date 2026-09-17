@@ -117,6 +117,14 @@ def test_config_set_nested_key(monkeypatch, tmp_path: Path):
     assert cfg.retry.max_retries == 5
 
 
+def test_litert_defaults_to_no_provider_retries(monkeypatch, tmp_path: Path):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("TITAN_CONFIG_PATH", str(cfg_path))
+    cfg_path.write_text(json.dumps({"provider": "litert", "model": "gemma4-12b"}))
+    cfg = load_harness_config()
+    assert cfg.retry.max_retries == 0
+
+
 def test_config_loads_saved_provider_api_keys(monkeypatch, tmp_path: Path):
     cfg_path = tmp_path / "config.json"
     monkeypatch.setenv("TITAN_CONFIG_PATH", str(cfg_path))

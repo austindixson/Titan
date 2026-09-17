@@ -1,11 +1,13 @@
 from __future__ import annotations
 import base64
+import ipaddress
 import json
 import random
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib import request, error
+from urllib import error, parse, request
 
 from .types import AssistantResponse, Message, Role, ToolCall
 from typing import Any
@@ -15,10 +17,43 @@ from .image_paths import candidate_image_paths_from_text
 from .image_preprocess import preprocess_image_for_attachment
 
 
+LOCAL_INFERENCE_READ_TIMEOUT_S = 600.0
+REMOTE_INFERENCE_READ_TIMEOUT_S = 90.0
+CODEX_INFERENCE_READ_TIMEOUT_S = 120.0
+
+
 class ProviderError(Exception):
     def __init__(self, message: str, retryable: bool = False):
         super().__init__(message)
         self.retryable = retryable
+
+
+def is_local_inference_base(base: str) -> bool:
+    """True for LAN / Tailscale / loopback OpenAI-compat endpoints (LiteRT, Ollama)."""
+    raw = (base or "").strip()
+    if not raw:
+        return False
+    parsed = parse.urlparse(raw if "://" in raw else f"http://{raw}")
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        return False
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0", "ghost32", "ghost64"}:
+        return True
+    if host.endswith(".local") or host.endswith(".ts.net") or host.endswith(".tailscale.net"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(ip.is_loopback or ip.is_private or ip.is_link_local)
+
+
+def inference_read_timeout_s(base: str) -> float:
+    if "chatgpt.com/backend-api/codex" in (base or ""):
+        return CODEX_INFERENCE_READ_TIMEOUT_S
+    if is_local_inference_base(base):
+        return LOCAL_INFERENCE_READ_TIMEOUT_S
+    return REMOTE_INFERENCE_READ_TIMEOUT_S
 
 
 class Provider:
@@ -299,15 +334,19 @@ class OpenAICompatProvider(Provider):
         }
         if on_event:
             payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
         req = request.Request(url, method="POST")
         req.add_header("Content-Type", "application/json")
+        req.add_header("Connection", "keep-alive")
         if on_event:
             req.add_header("Accept", "text/event-stream")
         req.add_header("Authorization", f"Bearer {token}")
         body = json.dumps(payload).encode()
 
+        timeout_s = inference_read_timeout_s(base)
+        local = is_local_inference_base(base)
         try:
-            with request.urlopen(req, data=body, timeout=90) as resp:
+            with request.urlopen(req, data=body, timeout=timeout_s) as resp:
                 if on_event:
                     return self._parse_chat_completions_stream(resp, on_event)
                 data = json.loads(resp.read().decode())
@@ -315,6 +354,8 @@ class OpenAICompatProvider(Provider):
             txt = self._read_http_error_body(e)
             retryable = e.code in (408, 409, 429, 500, 502, 503, 504)
             raise ProviderError(f"http {e.code}: {txt}", retryable=retryable)
+        except (TimeoutError, socket.timeout) as e:
+            raise ProviderError(str(e) or "timed out", retryable=not local)
         except Exception as e:
             raise ProviderError(str(e), retryable=True)
 
@@ -569,7 +610,7 @@ class OpenAICompatProvider(Provider):
         req.add_header("Accept", "text/event-stream")
         req.add_header("Authorization", f"Bearer {token}")
         try:
-            with request.urlopen(req, data=json.dumps(payload).encode(), timeout=120) as resp:
+            with request.urlopen(req, data=json.dumps(payload).encode(), timeout=CODEX_INFERENCE_READ_TIMEOUT_S) as resp:
                 text_parts, tool_calls_by_id = self._consume_codex_stream(resp, on_event)
         except ProviderError:
             raise

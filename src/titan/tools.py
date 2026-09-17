@@ -9,20 +9,31 @@ import time
 from urllib import parse, request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 from .types import ToolResult
 from .path_resolver import resolve_existing_read_path
+
+
+# Prefill-sensitive local backends (LiteRT/Ollama) only get the coding hot path.
+CODING_HOT_TOOLS: tuple[str, ...] = (
+    "read_file",
+    "write_file",
+    "shell",
+    "cd",
+)
 
 
 class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, Callable[[dict], str]] = {}
         self.cwd: Path = Path.cwd()
+        self._definitions_cache: dict[tuple[str, ...], list[dict]] = {}
 
     def register(self, name: str, fn: Callable[[dict], str]) -> None:
         self._tools[name] = fn
+        self._definitions_cache.clear()
 
-    def definitions(self) -> list[dict]:
+    def definitions(self, names: Iterable[str] | None = None) -> list[dict]:
         specs = {
             "read_file": {
                 "type": "object",
@@ -151,8 +162,16 @@ class ToolRegistry:
                 "required": ["action"],
             },
         }
+        if names is None:
+            selected = tuple(self._tools)
+        else:
+            wanted = set(names)
+            selected = tuple(k for k in self._tools if k in wanted)
+        cached = self._definitions_cache.get(selected)
+        if cached is not None:
+            return cached
         out = []
-        for k in self._tools:
+        for k in selected:
             out.append({
                 "type": "function",
                 "function": {
@@ -161,6 +180,7 @@ class ToolRegistry:
                     "parameters": specs.get(k, {"type": "object", "properties": {}}),
                 },
             })
+        self._definitions_cache[selected] = out
         return out
 
     def execute(self, call_id: str, name: str, arguments: dict) -> ToolResult:

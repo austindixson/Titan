@@ -80,3 +80,15 @@ def test_loop_blocks_browser_navigate_for_file_uri_image_reference(tmp_path):
     assert "browser_navigate" not in names
     image_events = [payload for event_type, payload in events if event_type == "image_attachments_detected"]
     assert image_events and image_events[0]["count"] == 1
+
+
+def test_litert_provider_sends_coding_hot_tools_only():
+    provider = _CapturingProvider(AssistantResponse(text="ok"))
+    loop = AgentLoop(
+        provider=provider,
+        tools=default_registry(),
+        config=HarnessConfig(provider="litert", model="gemma4-12b", permission_mode="allow"),
+    )
+    loop.run_with_callback("hi", [Message(role=Role.SYSTEM, content="s")])
+    names = [tool.get("function", {}).get("name") for tool in provider.tool_defs[0]]
+    assert names == ["read_file", "write_file", "shell", "cd"]
