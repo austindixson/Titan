@@ -34,6 +34,11 @@ _OPENAI_COMPAT_PROVIDER_SPECS: dict[str, dict[str, str]] = {
         "base_url_env": "XAI_BASE_URL",
         "default_base_url": "https://api.x.ai/v1",
     },
+    "grok": {
+        "api_key_env": "XAI_API_KEY",
+        "base_url_env": "XAI_BASE_URL",
+        "default_base_url": "https://api.x.ai/v1",
+    },
     "groq": {
         "api_key_env": "GROQ_API_KEY",
         "base_url_env": "GROQ_BASE_URL",
@@ -162,3 +167,85 @@ def resolve_openai_credentials(
     if creds:
         return creds
     return resolve_provider_credentials("openai", api_key_env=api_key_env)
+
+
+_GROK_FAMILY = {"grok", "xai", "xai-oauth"}
+_CODEX_FAMILY = {"openai-codex", "codex"}
+_TUI_HIDDEN_ALIASES = {"xai", "xai-oauth", "codex"}
+_PREFERRED_TUI_PROVIDERS = ("grok", "openai-codex", "litert")
+_PROVIDER_ALIASES = {
+    "codex": "openai-codex",
+    "astra": "openai-codex",
+    "gpt-6-astra": "openai-codex",
+    "xai-oauth": "grok",
+}
+
+PROVIDER_DEFAULT_MODELS = {
+    "grok": "grok-4.6",
+    "xai": "grok-4.6",
+    "openai-codex": "gpt-6-astra",
+    "openai": "gpt-5.4",
+    "litert": "gemma4-12b",
+    "zai": "glm-5.1",
+}
+
+PROVIDER_MODEL_OPTIONS = {
+    "grok": ["grok-4.6", "grok-4-fast-reasoning", "grok-4-fast-non-reasoning", "grok-3-mini"],
+    "xai": ["grok-4.6", "grok-4-fast-reasoning", "grok-4-fast-non-reasoning", "grok-3-mini"],
+    "openai-codex": ["gpt-6-astra", "gpt-5.4", "gpt-5.4-mini"],
+    "openai": ["gpt-6-astra", "gpt-5.4", "gpt-5.4-mini"],
+    "litert": ["gemma4-12b"],
+    "zai": ["glm-5.1"],
+}
+
+
+def canonical_provider(provider: str) -> str:
+    return _PROVIDER_ALIASES.get(provider.strip().lower(), provider.strip().lower())
+
+
+def provider_family(provider: str) -> str:
+    key = canonical_provider(provider)
+    if key in _GROK_FAMILY or key == "grok":
+        return "grok"
+    if key in _CODEX_FAMILY or key == "openai-codex":
+        return "codex"
+    return key
+
+
+def provider_display_name(provider: str) -> str:
+    family = provider_family(provider)
+    if family == "grok":
+        return "Grok"
+    if family == "codex":
+        return "Codex"
+    if canonical_provider(provider) == "litert":
+        return "LiteRT"
+    return canonical_provider(provider)
+
+
+def provider_default_model(provider: str) -> str:
+    key = canonical_provider(provider)
+    return PROVIDER_DEFAULT_MODELS.get(key, PROVIDER_DEFAULT_MODELS.get(provider_family(provider), "gpt-5.4"))
+
+
+def provider_model_options(provider: str) -> list[str]:
+    key = canonical_provider(provider)
+    models = list(PROVIDER_MODEL_OPTIONS.get(key) or PROVIDER_MODEL_OPTIONS.get(provider_family(key), []))
+    default = provider_default_model(key)
+    if default and default not in models:
+        models.insert(0, default)
+    return models
+
+
+def ordered_provider_options(names: list[str] | tuple[str, ...]) -> list[str]:
+    seen: list[str] = []
+    present: set[str] = set()
+    for raw in names:
+        name = str(raw).strip().lower()
+        if not name or name in present or name in _TUI_HIDDEN_ALIASES:
+            continue
+        present.add(name)
+        seen.append(name)
+    head = [name for name in _PREFERRED_TUI_PROVIDERS if name in present]
+    tail = [name for name in seen if name not in _PREFERRED_TUI_PROVIDERS]
+    return head + tail

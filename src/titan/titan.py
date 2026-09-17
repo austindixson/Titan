@@ -317,6 +317,9 @@ class TitanHarness:
         if self._active_loop is not None:
             self._active_loop.request_interrupt()
 
+    def interrupt(self) -> None:
+        self.request_interrupt()
+
     def _emit_harness(self, on_event: Optional[Callable[[AgentEvent], None]], event_type: str, **payload: Any) -> None:
         self.event_bus.emit(event_type, payload)
         if on_event:

@@ -24,6 +24,13 @@ class RetryConfig:
 
 
 @dataclass
+class CompactionConfig:
+    enabled: bool = True
+    reserve_tokens: int = 16384
+    keep_recent_tokens: int = 20000
+
+
+@dataclass
 class HarnessConfig:
     model: str = "gpt-5.4"
     provider: str = "openai-codex"
@@ -41,6 +48,7 @@ class HarnessConfig:
     learning_enabled: bool = False
     permission_mode: str = "allow"
     retry: RetryConfig = field(default_factory=RetryConfig)
+    compaction: CompactionConfig = field(default_factory=CompactionConfig)
 
     def api_key(self) -> str:
         return os.getenv(self.api_key_env, "")
@@ -181,6 +189,11 @@ def load_harness_config(
         os.getenv("TITAN_LEARNING_ENABLED", str(cfg.learning_enabled)),
         cfg.learning_enabled,
     )
+    comp = _deep_get(data, "compaction", {}) or {}
+    if isinstance(comp, dict):
+        cfg.compaction.enabled = _parse_bool(comp.get("enabled", True), True)
+        cfg.compaction.reserve_tokens = int(comp.get("reserve_tokens", 16384))
+        cfg.compaction.keep_recent_tokens = int(comp.get("keep_recent_tokens", 20000))
 
     if provider_override:
         cfg.provider = provider_override

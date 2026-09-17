@@ -22,10 +22,13 @@ class ToolCall:
 class Message:
     role: Role
     content: str = ""
+    id: Optional[str] = None
     tool_call_id: Optional[str] = None
     tool_name: Optional[str] = None
     is_error: bool = False
     tool_calls: list[ToolCall] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass

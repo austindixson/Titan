@@ -23,7 +23,7 @@ def _slash_help(_args: list[str], **_kwargs: object) -> SlashResult:
         message=(
             "commands: /help, /skills, /active, /use <slug>, /unuse <slug>, "
             "/todo, /memory [query], /config [get|set|unset] [key] [value], /trace, "
-            "/undo [checkpoint_id]"
+            "/undo [checkpoint_id], /compact [instructions]"
         ),
     )
 
@@ -140,6 +140,11 @@ def _slash_trace(_args: list[str], **_kwargs: object) -> SlashResult:
     return SlashResult(handled=True, message="trace-toggle")
 
 
+def _slash_compact(args: list[str], **_kwargs: object) -> SlashResult:
+    instructions = " ".join(args).strip()
+    return SlashResult(handled=True, message=f"compact:{instructions}")
+
+
 def _slash_undo(args: list[str], *, run_pending: bool = False, **_kwargs: object) -> SlashResult:
     if run_pending:
         return SlashResult(
@@ -172,6 +177,7 @@ _SLASH_HANDLERS: dict[str, Callable[..., SlashResult]] = {
     "trace": _slash_trace,
     "undo": _slash_undo,
     "checkpoints": _slash_checkpoints,
+    "compact": _slash_compact,
 }
 
 
