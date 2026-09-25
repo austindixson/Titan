@@ -45,6 +45,8 @@ class _StreamingResponse:
 
 def test_local_inference_host_detection_and_timeout():
     assert is_local_inference_base("http://ghost32:9379/v1") is True
+    assert is_local_inference_base("http://ghost128s-macbook-pro:9081/v1") is True
+    assert is_local_inference_base("http://ghost128:9081/v1") is True
     assert is_local_inference_base("http://127.0.0.1:11434/v1") is True
     assert is_local_inference_base("https://api.openai.com/v1") is False
     assert inference_read_timeout_s("http://ghost32:9379/v1") == LOCAL_INFERENCE_READ_TIMEOUT_S

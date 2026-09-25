@@ -28,6 +28,22 @@ class ProviderError(Exception):
         self.retryable = retryable
 
 
+def is_context_overflow(err: Exception) -> bool:
+    text = str(err).lower()
+    return any(
+        needle in text
+        for needle in (
+            "context length",
+            "maximum context",
+            "too many tokens",
+            "context_length",
+            "context window",
+            "prompt is too long",
+            "reduce the length",
+        )
+    )
+
+
 def is_local_inference_base(base: str) -> bool:
     """True for LAN / Tailscale / loopback OpenAI-compat endpoints (LiteRT, Ollama)."""
     raw = (base or "").strip()
@@ -37,7 +53,7 @@ def is_local_inference_base(base: str) -> bool:
     host = (parsed.hostname or "").strip().lower().rstrip(".")
     if not host:
         return False
-    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0", "ghost32", "ghost64"}:
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0", "ghost32", "ghost64", "ghost128", "ghost128s-macbook-pro"}:
         return True
     if host.endswith(".local") or host.endswith(".ts.net") or host.endswith(".tailscale.net"):
         return True
@@ -134,6 +150,25 @@ class OpenAICompatProvider(Provider):
             return self._generate_codex_responses(base, token, model, messages, tools, on_event=on_event)
 
         return self._generate_chat_completions(base, token, model, messages, tools, on_event=on_event)
+
+    def list_models(self) -> list[str]:
+        """List available models from the provider by calling /v1/models endpoint."""
+        base = (self.api_base or "").strip() or "https://api.openai.com/v1"
+        token = (self.api_key or "").strip()
+        if not token:
+            return []
+        
+        url = f"{base.rstrip('/')}/models"
+        req = request.Request(url, method="GET")
+        req.add_header("Authorization", f"Bearer {token}")
+        
+        try:
+            with request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                models = data.get("data", [])
+                return [m["id"] for m in models if isinstance(m, dict) and "id" in m]
+        except Exception:
+            return []
 
     def _read_http_error_body(self, e: error.HTTPError) -> str:
         try:

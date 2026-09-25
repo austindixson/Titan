@@ -74,6 +74,12 @@ _OPENAI_COMPAT_PROVIDER_SPECS: dict[str, dict[str, str]] = {
         "base_url_env": "LITERT_BASE_URL",
         "default_base_url": "http://ghost32:9379/v1",
     },
+    "homebase": {
+        "api_key_env": "HOMEBASE_API_KEY",
+        "base_url_env": "HOMEBASE_BASE_URL",
+        "default_base_url": "http://ghost128s-macbook-pro:9081/v1",
+        "description": "Local home base model via Tailscale (auto-detects ghost128s-macbook-pro.ts.net or localhost)",
+    },
 }
 
 
@@ -172,7 +178,7 @@ def resolve_openai_credentials(
 _GROK_FAMILY = {"grok", "xai", "xai-oauth"}
 _CODEX_FAMILY = {"openai-codex", "codex"}
 _TUI_HIDDEN_ALIASES = {"xai", "xai-oauth", "codex"}
-_PREFERRED_TUI_PROVIDERS = ("grok", "openai-codex", "litert")
+_PREFERRED_TUI_PROVIDERS = ("grok", "openai-codex", "homebase", "litert")
 _PROVIDER_ALIASES = {
     "codex": "openai-codex",
     "astra": "openai-codex",
@@ -183,18 +189,20 @@ _PROVIDER_ALIASES = {
 PROVIDER_DEFAULT_MODELS = {
     "grok": "grok-4.6",
     "xai": "grok-4.6",
-    "openai-codex": "gpt-6-astra",
+    "openai-codex": "gpt-5.6-luna",
     "openai": "gpt-5.4",
     "litert": "gemma4-12b",
+    "homebase": "homebase-brain",
     "zai": "glm-5.1",
 }
 
 PROVIDER_MODEL_OPTIONS = {
     "grok": ["grok-4.6", "grok-4-fast-reasoning", "grok-4-fast-non-reasoning", "grok-3-mini"],
     "xai": ["grok-4.6", "grok-4-fast-reasoning", "grok-4-fast-non-reasoning", "grok-3-mini"],
-    "openai-codex": ["gpt-6-astra", "gpt-5.4", "gpt-5.4-mini"],
-    "openai": ["gpt-6-astra", "gpt-5.4", "gpt-5.4-mini"],
+    "openai-codex": ["gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"],
+    "openai": ["gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"],
     "litert": ["gemma4-12b"],
+    "homebase": ["homebase-brain"],
     "zai": ["glm-5.1"],
 }
 
@@ -218,9 +226,12 @@ def provider_display_name(provider: str) -> str:
         return "Grok"
     if family == "codex":
         return "Codex"
-    if canonical_provider(provider) == "litert":
+    key = canonical_provider(provider)
+    if key == "homebase":
+        return "Home Base"
+    if key == "litert":
         return "LiteRT"
-    return canonical_provider(provider)
+    return key
 
 
 def provider_default_model(provider: str) -> str:
@@ -228,8 +239,31 @@ def provider_default_model(provider: str) -> str:
     return PROVIDER_DEFAULT_MODELS.get(key, PROVIDER_DEFAULT_MODELS.get(provider_family(provider), "gpt-5.4"))
 
 
+def _is_frontier_provider(provider: str) -> bool:
+    """Check if a provider is a frontier provider that needs dynamic model listing."""
+    key = canonical_provider(provider)
+    family = provider_family(provider)
+    return key in ("grok", "xai", "openai-codex", "openai") or family in ("grok", "codex")
+
+
 def provider_model_options(provider: str) -> list[str]:
     key = canonical_provider(provider)
+    
+    # For frontier providers, use dynamic listing
+    if _is_frontier_provider(provider):
+        try:
+            from .provider import OpenAICompatProvider, ProviderError
+            creds = resolve_provider_credentials(provider)
+            if creds and creds.token:
+                base_url = creds.base_url or provider_default_base_url(provider)
+                prov = OpenAICompatProvider(api_base=base_url, api_key=creds.token)
+                dynamic_models = prov.list_models()
+                if dynamic_models:
+                    return dynamic_models
+        except Exception:
+            # Fall through to static list if dynamic listing fails
+            pass
+    
     models = list(PROVIDER_MODEL_OPTIONS.get(key) or PROVIDER_MODEL_OPTIONS.get(provider_family(key), []))
     default = provider_default_model(key)
     if default and default not in models:

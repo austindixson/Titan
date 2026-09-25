@@ -57,9 +57,17 @@ def test_tui_provider_options_are_sanitized(monkeypatch):
     monkeypatch.setattr("titan.titan_tui.build_provider_from_config", lambda cfg: MockProvider(script=[]))
     monkeypatch.setattr("titan.titan_tui.supported_openai_compat_providers", lambda: ["", "xai", " xai ", "zai", "  ", "openai"])
     app = TitanTui()
-    assert app.provider_options[0] in {"openai", "grok", "openai-codex"}
+    assert app.provider_options[0] in {"openai", "grok", "openai-codex", "homebase"}
     assert "grok" in app.provider_options
     assert "openai-codex" in app.provider_options
+    assert "homebase" in app.provider_options
+
+
+def test_tui_provider_options_include_homebase(monkeypatch):
+    monkeypatch.setattr("titan.titan_tui.load_harness_config", lambda: HarnessConfig(provider="grok", model="grok-4.6"))
+    monkeypatch.setattr("titan.titan_tui.build_provider_from_config", lambda cfg: MockProvider(script=[]))
+    app = TitanTui()
+    assert app.provider_options == ["grok", "openai-codex", "homebase", "litert"]
 
 
 def test_tui_provider_options_prefer_grok_and_codex(monkeypatch):
@@ -581,6 +589,7 @@ def test_tui_progress_updates_are_periodic_and_throttled(monkeypatch):
     async def _run():
         app = TitanTui()
         async with app.run_test(size=(100, 32)):
+            app.harness.config.chat_recaps_enabled = False
             app.ui.pending = True
             app.ui.started_at = 90.0
             app.ui.state = "ACT"
@@ -633,6 +642,7 @@ def test_tui_progress_updates_chat_before_budget_stop_final(monkeypatch):
     async def _run():
         app = TitanTui()
         async with app.run_test(size=(100, 32)):
+            app.harness.config.chat_recaps_enabled = False
             app.ui.pending = True
             app.ui.started_at = 1.0
             app.ui.state = "REFLECT"
@@ -932,6 +942,7 @@ def test_tui_multi_turn_final_output_omits_summary_footer_when_recaps_disabled(m
     async def _run():
         app = TitanTui()
         async with app.run_test(size=(100, 32)):
+            app.harness.config.chat_recaps_enabled = False
             out = RunOutcome(
                 text="It's running locally now.",
                 stop=RunStopContract(

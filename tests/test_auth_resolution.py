@@ -1,7 +1,12 @@
 import json
 from pathlib import Path
 
-from titan.auth import provider_default_base_url, resolve_openai_credentials, supported_openai_compat_providers
+from titan.auth import (
+    provider_default_base_url,
+    provider_display_name,
+    resolve_openai_credentials,
+    supported_openai_compat_providers,
+)
 
 
 def test_resolve_from_env(monkeypatch):
@@ -38,3 +43,15 @@ def test_resolve_from_hermes_auth_file(monkeypatch, tmp_path: Path):
 def test_litert_is_a_supported_openai_compat_provider():
     assert "litert" in supported_openai_compat_providers()
     assert provider_default_base_url("litert") == "http://ghost32:9379/v1"
+
+
+def test_homebase_is_a_supported_openai_compat_provider():
+    assert "homebase" in supported_openai_compat_providers()
+    assert provider_default_base_url("homebase") == "http://ghost128s-macbook-pro:9081/v1"
+
+
+def test_provider_display_names_distinguish_homebase_from_litert():
+    assert provider_display_name("homebase") == "Home Base"
+    assert provider_display_name("litert") == "LiteRT"
+    assert provider_display_name("grok") == "Grok"
+    assert provider_display_name("openai-codex") == "Codex"

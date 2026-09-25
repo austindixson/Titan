@@ -309,7 +309,7 @@ class TitanTui(App[None]):
         super().__init__()
         self.theme = "textual-dark"
         self.cfg = load_harness_config()
-        self.provider_options = ordered_provider_options(["grok", "openai-codex", "litert"])
+        self.provider_options = ordered_provider_options(["grok", "openai-codex", "homebase", "litert"])
         current = canonical_provider(str(self.cfg.provider).strip().lower())
         family = provider_family(current)
         if family == "grok":
@@ -321,7 +321,9 @@ class TitanTui(App[None]):
         self.model_options = self._models_for_provider(self.cfg.provider, self.cfg.model)
         self._model_button_models: dict[str, str] = {}
         provider = build_provider_from_config(self.cfg)
-        self.harness = TitanHarness(provider=provider, tools=default_registry(), config=self.cfg, session_store=SessionStore(".titan/session.jsonl"))
+        tools = default_registry()
+        session_path = str(tools.cwd / ".titan" / "session.jsonl")
+        self.harness = TitanHarness(provider=provider, tools=tools, config=self.cfg, session_store=SessionStore(session_path))
         system = Message(role=Role.SYSTEM, content=TITAN_SYSTEM_PROMPT)
         entries = self.harness.session_store.load_entries()
         self.history = rebuild_llm_context(system, entries) if entries else [system]
@@ -359,7 +361,7 @@ class TitanTui(App[None]):
     def compose(self) -> ComposeResult:
         with Horizontal(id="masthead"):
             yield Static("TITAN", id="brand")
-            yield Static(Path.cwd().name, id="workspace", markup=False)
+            yield Static(self.harness.workspace.label, id="workspace", markup=False)
             with Horizontal(id="top_tabs"):
                 yield Button("Trace", id="tab-trace")
                 yield Button("Diff", id="tab-diff")
@@ -367,7 +369,23 @@ class TitanTui(App[None]):
             with Container(id="welcome"):
                 yield Static("✳", id="welcome-mark")
                 yield Static("What are we building?", id="welcome-title")
-                yield Static("Describe a change. Drop a file. Start with an idea.", id="welcome-subtitle")
+                # Quick-start instructions: show provider setup if not configured.
+                provider_label = self.cfg.provider or "(not set)"
+                model_label = self.cfg.model or "(not set)"
+                has_key = self._provider_has_key(self.cfg.provider)
+                if not has_key:
+                    subtitle = (
+                        f"Set up a provider first:\n"
+                        f"  1) /config set provider {provider_label}\n"
+                        f"  2) /config set model {model_label}\n"
+                        f"  3) Click 'New key' or paste an API key, then press Enter"
+                    )
+                else:
+                    subtitle = (
+                        f"Configured: {provider_label} / {model_label}. "
+                        f"Type a task and press Enter."
+                    )
+                yield Static(subtitle, id="welcome-subtitle")
                 yield Static("/help  commands     ↑  prompt history", id="welcome-hint")
             yield ConversationLog(id="output")
             with Container(id="top"):
@@ -404,6 +422,7 @@ class TitanTui(App[None]):
         self.query_one("#provider_menu", Container).styles.display = "none"
         self.query_one("#model_menu", Container).styles.display = "none"
         self._rebuild_model_menu()
+        self._refresh_workspace_label()
         self.query_one("#api_key_input", Input).display = False
         self.query_one("#btn-new-key", Button).styles.display = "none"
         self.query_one("#input", ComposerTextArea).focus()
@@ -416,6 +435,15 @@ class TitanTui(App[None]):
 
     def on_resize(self) -> None:
         self._apply_responsive_layout(self.size.width)
+
+    def _refresh_workspace_label(self) -> None:
+        try:
+            widget = self.query_one("#workspace", Static)
+        except NoMatches:
+            return
+        ws = self.harness.workspace
+        widget.update(ws.label)
+        widget.tooltip = str(ws.cwd)
 
     def _apply_responsive_layout(self, width: int) -> None:
         compact = width < 80
@@ -493,7 +521,7 @@ class TitanTui(App[None]):
         try:
             result = subprocess.run(
                 ["git", "diff", "--no-ext-diff", "--"],
-                cwd=".",
+                cwd=str(self.harness.tools.cwd),
                 text=True,
                 capture_output=True,
                 timeout=5,
@@ -640,7 +668,28 @@ class TitanTui(App[None]):
         return ("🔧", name or "tool", self._compact(str(arguments), 100))
 
     def _brief_chat_text(self, text: str, max_chars: int = 1400, max_lines: int = 12, grace_chars: int = 320) -> str:
-        return text.strip()
+        """Briefly trim long responses for the chat box, with a grace window."""
+        stripped = text.strip()
+        if not stripped:
+            return stripped
+        # If already under max_chars, return as-is.
+        if len(stripped) <= max_chars:
+            return stripped
+        # Count lines; if under max_lines, return as-is (the grace window
+        # exists so the last complete sentence is preserved).
+        lines = stripped.splitlines()
+        if len(lines) <= max_lines:
+            return stripped
+        # Truncate to max_chars worth of lines, then extend by grace_chars
+        # to avoid cutting mid-sentence.
+        truncated = "\n".join(lines[:max_lines])
+        if len(truncated) <= max_chars - grace_chars:
+            # Add a few more lines within the grace window.
+            extra = max_lines
+            while extra <= len(lines) and len(truncated) < max_chars - grace_chars:
+                truncated += "\n" + lines[extra]
+                extra += 1
+        return truncated
 
     def _theme_color_for_speaker(self, speaker: str, requested: str) -> str:
         theme = self.themes[self.theme_index]
@@ -706,16 +755,38 @@ class TitanTui(App[None]):
     def _refresh_status(self) -> None:
         window = context_window_for(self.harness.config.provider, self.harness.config.model)
         ctx_tokens = estimate_context_tokens(self.history)
-        status = (
-            f"{ctx_tokens / window:.0%} context · {self.ui.tool_calls} tools"
-            + (f" · turn {self.ui.turn}" if self.ui.pending else " · /help commands")
-        )
+        status_parts = [f"{ctx_tokens / window:.0%} context · {self.ui.tool_calls} tools"]
+
+        if self.ui.pending:
+            status_parts.append(f"turn {self.ui.turn}")
+            # Show remaining wall-clock time.
+            if self.ui.started_at is not None:
+                elapsed = time.time() - self.ui.started_at
+                total_ms = self.harness.config.max_wall_clock_ms
+                remaining_ms = max(0, total_ms - elapsed * 1000)
+                remaining_s = remaining_ms / 1000
+                if remaining_s > 0:
+                    mins, secs = divmod(int(remaining_s), 60)
+                    status_parts.append(f"{mins}:{secs:02d}s remaining")
+                else:
+                    status_parts.append("no time left")
+            status_parts.append(f"state {self.ui.state}")
+        else:
+            # Show provider status when idle.
+            provider_name = self.harness.config.provider
+            has_key = self._provider_has_key(provider_name)
+            if has_key:
+                status_parts.append("✓ connected")
+            else:
+                status_parts.append("⚠ no key for " + provider_name)
+            status_parts.append("/help commands")
+
         if self.size.width >= 110:
-            status += "   ctrl+d details · ctrl+end latest · ctrl+q quit"
+            status_parts.append("ctrl+d details · ctrl+end latest · ctrl+q quit")
         elif self.size.width >= 80:
-            status += "   ctrl+end latest"
+            status_parts.append("ctrl+end latest")
         try:
-            self.query_one("#status_line", Static).update(status)
+            self.query_one("#status_line", Static).update("   ".join(status_parts))
             self.query_one("#btn-stop").display = self.ui.pending
             self.query_one("#btn-provider", Button).disabled = self.ui.pending
             self.query_one("#btn-model", Button).disabled = self.ui.pending
@@ -766,7 +837,7 @@ class TitanTui(App[None]):
         self.action_follow_latest()
 
         if task.startswith("/"):
-            res = execute_slash_command(task)
+            res = execute_slash_command(task, run_pending=self.ui.pending, registry=self.harness.tools, harness=self.harness)
             if res.handled:
                 if res.message == "trace-toggle":
                     self.action_toggle_trace_verbosity()
@@ -830,6 +901,8 @@ class TitanTui(App[None]):
                     self._write_chat_box("You", task, "cyan")
                     prefix = "Titan error" if res.is_error else "Titan"
                     self._write_chat_box(prefix, res.message, "red" if res.is_error else "green")
+                    if task.startswith("/cd") or task.startswith("/pwd"):
+                        self._refresh_workspace_label()
                 return
 
         self._write_chat_box("You", task, "cyan")
@@ -992,6 +1065,11 @@ class TitanTui(App[None]):
             label = self.tool_targets.pop(str(ev.payload.get("id", "")), name or "tool")
             self._write_chat_plain(f"{'×' if is_error else '✓'} {label}" + (f" · {self._compact(content, 100)}" if is_error else ""))
             self._trace_emit(trace, f"┊ {status_icon} {name or 'tool'} {('ERR' if is_error else 'OK')} {compact_content}", ev.payload)
+            if name == "cd" and not is_error:
+                from .workspace import inspect_workspace
+
+                self.harness.workspace = inspect_workspace(self.harness.tools.cwd)
+                self._refresh_workspace_label()
             if self._chat_trace_mode() == "full":
                 self._emit_chat_trace(
                     f"tool-result {name or 'unknown'} {'ERR' if is_error else 'OK'} {compact_content}"
@@ -1204,12 +1282,24 @@ class TitanTui(App[None]):
     def _provider_has_key(self, provider: str) -> bool:
         if provider == "mock":
             return True
+        # Local no-auth OpenAI-compat endpoints (Home Base brain, LiteRT).
+        if canonical_provider(provider) in {"homebase", "litert"}:
+            return True
         if self.harness.config.api_keys.get(provider):
             return True
         try:
             return resolve_provider_credentials(provider, base_url=self.harness.config.api_base or None) is not None
         except Exception:
             return False
+
+    def _ensure_local_provider_key(self, provider: str) -> None:
+        """Seed a placeholder key so Authorization headers exist for no-auth local servers."""
+        key = canonical_provider(provider)
+        if key not in {"homebase", "litert"}:
+            return
+        if (self.harness.config.api_keys.get(key) or "").strip():
+            return
+        self._save_provider_key(key, "local")
 
     def _prompt_for_provider_key(self, provider: str) -> None:
         self.pending_api_key_provider = provider
@@ -1222,17 +1312,12 @@ class TitanTui(App[None]):
         key_input.focus()
         self._write_trace(f"provider {provider} needs a saved API key")
 
-    def _show_new_key_button_temporarily(self) -> None:
-        btn = self.query_one("#btn-new-key", Button)
-        btn.styles.display = "block"
-
-        def _hide() -> None:
-            try:
-                self.query_one("#btn-new-key", Button).styles.display = "none"
-            except NoMatches:
-                return
-
-        self.set_timer(6.0, _hide)
+    def _show_new_key_button_forever(self) -> None:
+        """Keep the 'New key' button visible until a key is configured."""
+        try:
+            self.query_one("#btn-new-key", Button).styles.display = "block"
+        except NoMatches:
+            pass
 
     def _validate_provider_key(self, provider: str, key: str) -> tuple[bool, str]:
         try:
@@ -1339,7 +1424,8 @@ class TitanTui(App[None]):
             self.cfg.model = default_model
             update_config_key(resolve_config_path(), "model", default_model)
         update_config_key(resolve_config_path(), "provider", next_provider)
-        self._show_new_key_button_temporarily()
+        self._ensure_local_provider_key(next_provider)
+        self._show_new_key_button_forever()
         self.harness.provider = build_provider_from_config(self.harness.config)
         if not self._provider_has_key(next_provider):
             self._prompt_for_provider_key(next_provider)
